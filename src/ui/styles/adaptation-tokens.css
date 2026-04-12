@@ -1,0 +1,91 @@
+/**
+ * adaptation-tokens.css
+ * RÔLE : Variables CSS dynamiques — pont entre le moteur TypeScript et l'UI React.
+ * Ces variables sont modifiées par CSSTokenEmitter.ts en temps réel.
+ * Les transitions CSS assurent la fluidité automatiquement (aucun JS supplémentaire).
+ *
+ * UTILISATION dans les composants React :
+ *   style={{ fontFamily: 'var(--qs-font-family)' }}
+ *   ou via la classe CSS .qs-text
+ */
+
+ :root {
+    /* ── Typographie ─────────────────────────────────────────────────── */
+    --qs-font-family:     inherit;
+    --qs-font-size:       1rem;
+    --qs-line-height:     1.6;
+    --qs-letter-spacing:  normal;
+    --qs-word-spacing:    normal;
+    --qs-paragraph-spacing: 0.5em;
+  
+    /* ── Couleurs & contraste ────────────────────────────────────────── */
+    --qs-bg-color:        #FFFFFF;
+    --qs-text-color:      #1A1A1A;
+  
+    /* ── Direction de lecture ────────────────────────────────────────── */
+    --qs-direction:       ltr;
+    --qs-text-align:      left;
+    --qs-margin-start:    auto;
+    --qs-margin-end:      0;
+    --qs-padding-start:   0;
+    --qs-padding-end:     1rem;
+  
+    /* ── Transitions — rend tous les changements fluides ─────────────── */
+    --qs-transition-duration: 500ms;
+  }
+  
+  /* Classe appliquée sur le conteneur de lecture principal */
+  .qs-reader {
+    font-family:     var(--qs-font-family);
+    font-size:       var(--qs-font-size);
+    line-height:     var(--qs-line-height);
+    letter-spacing:  var(--qs-letter-spacing);
+    word-spacing:    var(--qs-word-spacing);
+    background-color:var(--qs-bg-color);
+    color:           var(--qs-text-color);
+    direction:       var(--qs-direction);
+    text-align:      var(--qs-text-align);
+  
+    transition:
+      font-family           var(--qs-transition-duration) ease,
+      font-size             var(--qs-transition-duration) ease,
+      line-height           var(--qs-transition-duration) ease,
+      letter-spacing        var(--qs-transition-duration) ease,
+      word-spacing          var(--qs-transition-duration) ease,
+      background-color      var(--qs-transition-duration) ease,
+      color                 var(--qs-transition-duration) ease;
+  }
+  
+  /* Espacement des paragraphes */
+  .qs-reader p + p {
+    margin-top: var(--qs-paragraph-spacing);
+  }
+  
+  /* Texte en arabe — override direction par bloc */
+  .qs-rtl {
+    direction: rtl;
+    text-align: right;
+  }
+  
+  /* Texte en français — override direction par bloc */
+  .qs-ltr {
+    direction: ltr;
+    text-align: left;
+  }
+  
+  /* Indicateur d'adaptation active (discret) */
+  .qs-adaptation-indicator {
+    position: fixed;
+    bottom: 1rem;
+    right: 1rem;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #1D9E75;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  
+  .qs-adaptation-indicator.active {
+    opacity: 0.6;
+  }

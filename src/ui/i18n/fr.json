@@ -1,0 +1,9 @@
+{
+    "app": { "name": "Qalam-Sense" },
+    "nav": { "back": "← Retour" },
+    "home": { "greeting": "Qui lit aujourd'hui ?" },
+    "reader": { "readingZone": "Zone de lecture" },
+    "consent": { "accept": "Accepter et continuer" },
+    "settings": { "save": "Sauvegarder" },
+    "profile": { "firstName": "Prénom (uniquement)" }
+  }

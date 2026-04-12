@@ -1,0 +1,10 @@
+{
+    "app": { "name": "قلم-سنس" },
+    "nav": { "back": "رجوع" },
+    "home": { "greeting": "من يقرأ اليوم؟" },
+    "reader": { "readingZone": "منطقة القراءة" },
+    "consent": { "accept": "قبول والمتابعة" },
+    "settings": { "save": "حفظ" },
+    "profile": { "firstName": "الاسم الأول فقط" }
+    
+  }

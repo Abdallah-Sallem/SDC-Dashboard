@@ -1,0 +1,46 @@
+/**
+ * rtl-ltr.css
+ * RÔLE : Styles directionnels pour le support bilingue arabe/français.
+ * Utilise les propriétés CSS logiques (margin-inline, padding-inline)
+ * qui s'adaptent automatiquement à la direction du texte.
+ */
+
+/* ── Typographie arabe ────────────────────────────────────────────────── */
+:lang(ar) {
+    font-feature-settings: "kern" 1;
+    text-rendering: optimizeLegibility;
+  }
+  
+  /* Les chiffres restent LTR même dans un contexte RTL */
+  :lang(ar) .qs-number {
+    direction: ltr;
+    display: inline-block;
+  }
+  
+  /* ── Layout directionnel ─────────────────────────────────────────────── */
+  [dir="rtl"] .qs-nav-icon {
+    transform: scaleX(-1); /* Retourner les icônes de flèche */
+  }
+  
+  [dir="rtl"] .qs-progress-bar {
+    transform-origin: right;
+  }
+  
+  /* ── Boutons et contrôles ────────────────────────────────────────────── */
+  [dir="rtl"] .qs-button-group {
+    flex-direction: row-reverse;
+  }
+  
+  /* ── Mixte : bloc arabe dans page française ─────────────────────────── */
+  .qs-arabic-block {
+    direction: rtl;
+    text-align: right;
+    font-family: var(--qs-font-family), "Amiri", "Scheherazade New", serif;
+    line-height: calc(var(--qs-line-height) * 1.1); /* Interligne légèrement plus grand pour l'arabe */
+  }
+  
+  /* ── Mixte : bloc français dans page arabe ──────────────────────────── */
+  .qs-french-block {
+    direction: ltr;
+    text-align: left;
+  }
