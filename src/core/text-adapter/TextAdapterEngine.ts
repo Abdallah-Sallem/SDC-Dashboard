@@ -227,10 +227,10 @@ export class TextAdapterEngine {
     if (level === 'MEDIUM') {
       return {
         fontFamily: this.profile.preferredFont ?? 'inherit',
-        fontSize: '1rem',
-        lineHeight: 1.75,
-        letterSpacing: '0.02em',
-        wordSpacing: '0.08em',
+        fontSize: '1.08rem',
+        lineHeight: 1.85,
+        letterSpacing: '0.03em',
+        wordSpacing: '0.10em',
         backgroundColor: '#FFFEFA',
         textColor: '#1A1A1A',
         contrastLevel: 'normal',
@@ -241,10 +241,10 @@ export class TextAdapterEngine {
 
     return {
       fontFamily: 'AtkinsonHyperlegible',
-      fontSize: '1.12rem',
-      lineHeight: 2.05,
-      letterSpacing: '0.06em',
-      wordSpacing: '0.18em',
+      fontSize: '1.24rem',
+      lineHeight: 2.2,
+      letterSpacing: '0.08em',
+      wordSpacing: '0.22em',
       backgroundColor: '#F3F9FF',
       textColor: '#0F2A43',
       contrastLevel: 'high',

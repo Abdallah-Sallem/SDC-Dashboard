@@ -45,6 +45,9 @@ interface ExtractedFeatures {
   saccadeSpeed: number;
   lineSkipRate: number;
   blinkRate: number;
+  fixationInstability: number;
+  headStability: number;
+  trackingLossRate: number;
 }
 
 const FIXATION_RADIUS_PX = 24;
@@ -58,6 +61,7 @@ export class AdaptiveLoopController {
   private readonly options: Required<AdaptiveLoopControllerOptions>;
 
   private unsubscribePoints: (() => void) | null = null;
+  private unsubscribeMetrics: (() => void) | null = null;
 
   private isActive = false;
   private smoothingBuffer: GazePointData[] = [];
@@ -66,6 +70,7 @@ export class AdaptiveLoopController {
   private previousScore = 0;
   private currentLevel: AdaptiveDifficultyLevel = 'none';
   private lastAppliedAt = 0;
+  private latestExternalMetrics: Partial<GazeMetrics> = {};
 
   constructor(sessionId: string, options: AdaptiveLoopControllerOptions = {}) {
     this.sessionId = sessionId;
@@ -87,6 +92,15 @@ export class AdaptiveLoopController {
       this.handlePoint(event.payload);
     });
 
+    this.unsubscribeMetrics = EventBus.on<GazeMetrics>('gaze:metrics', (event) => {
+      this.latestExternalMetrics = {
+        blinkRate: event.payload.blinkRate,
+        headStability: event.payload.headStability,
+        trackingLossRate: event.payload.trackingLossRate,
+        fixationInstability: event.payload.fixationInstability,
+      };
+    });
+
     this.isActive = true;
     logger.info('AdaptiveLoopController', 'Boucle adaptative démarrée', {
       sessionId: this.sessionId,
@@ -99,12 +113,15 @@ export class AdaptiveLoopController {
   stop(): void {
     this.unsubscribePoints?.();
     this.unsubscribePoints = null;
+    this.unsubscribeMetrics?.();
+    this.unsubscribeMetrics = null;
 
     this.smoothingBuffer = [];
     this.featureBuffer = [];
     this.previousScore = 0;
     this.currentLevel = 'none';
     this.lastAppliedAt = 0;
+    this.latestExternalMetrics = {};
     this.isActive = false;
 
     logger.info('AdaptiveLoopController', 'Boucle adaptative arrêtée', {
@@ -184,7 +201,10 @@ export class AdaptiveLoopController {
         gazeStability: 1,
         saccadeSpeed: 0,
         lineSkipRate: 0,
-        blinkRate: 15,
+        blinkRate: this.latestExternalMetrics.blinkRate ?? 15,
+        fixationInstability: this.latestExternalMetrics.fixationInstability ?? 0,
+        headStability: this.latestExternalMetrics.headStability ?? 1,
+        trackingLossRate: this.latestExternalMetrics.trackingLossRate ?? 0,
       };
     }
 
@@ -245,7 +265,10 @@ export class AdaptiveLoopController {
       gazeStability,
       saccadeSpeed,
       lineSkipRate: lineSkips / (points.length - 1),
-      blinkRate: 15,
+      blinkRate: this.latestExternalMetrics.blinkRate ?? 15,
+      fixationInstability: this.latestExternalMetrics.fixationInstability ?? spread,
+      headStability: this.latestExternalMetrics.headStability ?? gazeStability,
+      trackingLossRate: this.latestExternalMetrics.trackingLossRate ?? 0,
     };
   }
 
@@ -256,6 +279,9 @@ export class AdaptiveLoopController {
       regressionCount: features.regressionCount,
       blinkRate: features.blinkRate,
       lineSkipRate: features.lineSkipRate,
+      fixationInstability: features.fixationInstability,
+      headStability: features.headStability,
+      trackingLossRate: features.trackingLossRate,
       timestamp: Date.now(),
     };
   }

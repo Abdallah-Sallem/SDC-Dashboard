@@ -16,13 +16,11 @@
    const [isActive, setIsActive] = useState(false);
  
    useEffect(() => {
-     // Créer et démarrer le moteur
      const engine = new TextAdapterEngine(profile, sessionId);
      engine.start();
      engineRef.current = engine;
      setIsActive(true);
  
-     // Écouter les adaptations appliquées pour mettre à jour l'état React
      const unsub = EventBus.on<AdaptationParams>('adaptation:apply', (event) => {
        setCurrentParams(event.payload);
      });

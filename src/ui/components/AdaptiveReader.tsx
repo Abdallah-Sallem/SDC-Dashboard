@@ -13,7 +13,8 @@ import { useEyeTracking }      from '../hooks/useEyeTracking';
 import { useBilingual }        from '../hooks/useBilingual';
 import { AdaptationIndicator } from './AdaptationIndicator';
 import { ReadingProgress }     from './ReadingProgress';
-import type { AdaptationParams, StudentProfile, TeacherText } from '../../shared/types';
+import { EventBus }            from '../../core/event-bus/EventBus';
+import type { AdaptationParams, GazePointData, StudentProfile, TeacherText } from '../../shared/types';
 
 
 interface AdaptiveReaderProps {
@@ -76,15 +77,23 @@ function splitSyllablesFr(word: string): string[] {
 
 const SYLLABLE_COLORS = ['#1D5FA5', '#8B2A8B'];
 
-const Word: React.FC<{ word: string; isDyslexic: boolean; isRTL: boolean }> = ({
-  word, isDyslexic, isRTL,
+const Word: React.FC<{ word: string; isDyslexic: boolean; isRTL: boolean; wordIndex: number; }> = ({
+  word, isDyslexic, isRTL, wordIndex
 }) => {
   const isAlpha = /\p{L}/u.test(word);
-  if (!isDyslexic || !isAlpha) return <span>{word}</span>;
+  const wordId = `word-${wordIndex}`;
+
+  if (!isDyslexic || !isAlpha) {
+    return <span id={wordId} className="adaptive-word">{word}</span>;
+  }
+
   const syllables = isRTL ? [word] : splitSyllablesFr(word);
-  if (syllables.length <= 1) return <span>{word}</span>;
+  if (syllables.length <= 1) {
+    return <span id={wordId} className="adaptive-word">{word}</span>;
+  }
+
   return (
-    <span>
+    <span id={wordId} className="adaptive-word">
       {syllables.map((syl, i) => (
         <span key={i} style={{ color: SYLLABLE_COLORS[i % 2], fontWeight: 500 }}>{syl}</span>
       ))}
@@ -93,8 +102,8 @@ const Word: React.FC<{ word: string; isDyslexic: boolean; isRTL: boolean }> = ({
 };
 
 const ReadingParagraph: React.FC<{
-  text: string; isDyslexic: boolean; isRTL: boolean; isActive: boolean;
-}> = ({ text, isDyslexic, isRTL, isActive }) => (
+  text: string; isDyslexic: boolean; isRTL: boolean; isActive: boolean; paragraphIndex: number;
+}> = ({ text, isDyslexic, isRTL, isActive, paragraphIndex }) => (
   <p style={{
     marginBottom:  'var(--qs-paragraph-spacing, 1em)',
     padding:       '4px 8px 4px 6px',
@@ -110,7 +119,7 @@ const ReadingParagraph: React.FC<{
     {text.split(/(\s+)/).map((token, i) =>
       /^\s+$/.test(token)
         ? <span key={i}>{token}</span>
-        : <Word key={i} word={token} isDyslexic={isDyslexic} isRTL={isRTL} />
+        : <Word key={i} word={token} isDyslexic={isDyslexic} isRTL={isRTL} wordIndex={paragraphIndex * 1000 + i} />
     )}
   </p>
 );
@@ -250,6 +259,7 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
   const [endReason,  setEndReason]  = useState<'completed' | 'timeout'>('completed');
   const [activePara, setActivePara] = useState(0);
   const [elapsed,    setElapsed]    = useState(0);
+  const [gazePoint,  setGazePoint]  = useState<{ x: number; y: number; confidence: number } | null>(null);
 
   const maxDuration = getMaxDuration(profile.age);
 
@@ -334,6 +344,26 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
     return () => window.removeEventListener('keydown', handler);
   }, [started, ended, goNext, goPrev]);
 
+  // Affiche un curseur live là où le regard est estimé.
+  useEffect(() => {
+    if (!started || ended) return;
+
+    const unsub = EventBus.on<GazePointData>('gaze:point', (event) => {
+      if (event.sessionId !== sessionId) return;
+
+      setGazePoint({
+        x: event.payload.x,
+        y: event.payload.y,
+        confidence: event.payload.confidence,
+      });
+    });
+
+    return () => {
+      unsub();
+      setGazePoint(null);
+    };
+  }, [started, ended, sessionId]);
+
   const readerStyle: React.CSSProperties = {
     fontFamily:      'var(--qs-font-family)',
     fontSize:        'var(--qs-font-size)',
@@ -376,10 +406,32 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
 
   const timeLeft    = Math.max(0, maxDuration - elapsed);
   const timeWarning = timeLeft < 2 * 60 * 1000;
+  const showGazeCursor = hasPermission === true && gazePoint !== null;
 
   return (
     <div style={{ position: 'relative' }}>
       <AdaptationIndicator isActive={adapterActive && aidLevel !== 'LOW'} />
+
+      {showGazeCursor && gazePoint && (
+        <div
+          aria-hidden
+          style={{
+            position: 'fixed',
+            left: gazePoint.x,
+            top: gazePoint.y,
+            transform: 'translate(-50%, -50%)',
+            width: 22,
+            height: 22,
+            borderRadius: '50%',
+            border: `2px solid ${gazePoint.confidence >= 0.7 ? '#1D9E75' : '#BA7517'}`,
+            background: 'rgba(29, 158, 117, 0.10)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            transition: 'left 80ms linear, top 80ms linear, border-color 120ms ease',
+            boxShadow: '0 0 0 6px rgba(29, 158, 117, 0.08)',
+          }}
+        />
+      )}
 
       <div
         role="status"
@@ -466,6 +518,7 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
               isDyslexic={isDyslexic}
               isRTL={isRTL}
               isActive={i === activePara}
+              paragraphIndex={i}
             />
           </div>
         ))}

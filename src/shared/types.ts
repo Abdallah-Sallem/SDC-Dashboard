@@ -40,6 +40,10 @@ export interface GazePointData {
   y: number;
   timestamp: number;
   confidence: number;
+  blinkRate?: number;
+  headStability?: number;
+  trackingLossRate?: number;
+  fixationInstability?: number;
 }
 
 export type TrackingLostReason = 'face_lost' | 'camera_off';
@@ -55,6 +59,9 @@ export interface GazeMetrics {
   regressionCount:  number;
   blinkRate:        number;
   lineSkipRate:     number;
+  fixationInstability: number;
+  headStability: number;
+  trackingLossRate: number;
   timestamp:        number;
 }
 
