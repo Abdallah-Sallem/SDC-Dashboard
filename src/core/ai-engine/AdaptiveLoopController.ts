@@ -24,6 +24,8 @@ import { logger } from '../../shared/logger';
 import type {
   AdaptiveDifficultyLevel,
   AdaptiveLoopOutput,
+  DetectorDebugPayload,
+  DetectorMode,
   DifficultySignal,
   GazeMetrics,
   GazePointData,
@@ -62,6 +64,7 @@ export class AdaptiveLoopController {
 
   private unsubscribePoints: (() => void) | null = null;
   private unsubscribeMetrics: (() => void) | null = null;
+  private unsubscribeMode: (() => void) | null = null;
 
   private isActive = false;
   private smoothingBuffer: GazePointData[] = [];
@@ -101,6 +104,15 @@ export class AdaptiveLoopController {
       };
     });
 
+    this.unsubscribeMode = EventBus.on<{ mode: DetectorMode }>('detector:mode', (event) => {
+      if (event.sessionId !== this.sessionId) return;
+      this.detector.setMode(event.payload.mode);
+      logger.info('AdaptiveLoopController', 'Detector mode updated', {
+        mode: event.payload.mode,
+        sessionId: this.sessionId,
+      });
+    });
+
     this.isActive = true;
     logger.info('AdaptiveLoopController', 'Boucle adaptative démarrée', {
       sessionId: this.sessionId,
@@ -115,6 +127,8 @@ export class AdaptiveLoopController {
     this.unsubscribePoints = null;
     this.unsubscribeMetrics?.();
     this.unsubscribeMetrics = null;
+    this.unsubscribeMode?.();
+    this.unsubscribeMode = null;
 
     this.smoothingBuffer = [];
     this.featureBuffer = [];
@@ -149,7 +163,11 @@ export class AdaptiveLoopController {
     const metrics = this.toGazeMetrics(features);
 
     const inferred = this.detector.infer(metrics);
-    const adjustedScore = this.computeAdjustedScore(inferred?.level ?? 0, features.gazeStability);
+    const detectorDebug = this.detector.getLastDebug();
+    const adjustedScore = this.computeAdjustedScore(
+      detectorDebug.selectedScore,
+      features.gazeStability
+    );
     const nextLevel = this.resolveLevel(adjustedScore);
 
     const signal = inferred
@@ -160,6 +178,17 @@ export class AdaptiveLoopController {
           timestamp: Date.now(),
         }
       : null;
+
+    const debugPayload: DetectorDebugPayload = {
+      ...detectorDebug,
+      adjustedScore,
+      currentLevel: this.currentLevel,
+      nextLevel,
+      triggered: adjustedScore >= DIFFICULTY_THRESHOLD_LIGHT,
+      timestamp: Date.now(),
+    };
+
+    EventBus.emit('detector:debug', debugPayload, this.sessionId);
 
     this.applyAdaptationControl(nextLevel, adjustedScore, signal);
   }

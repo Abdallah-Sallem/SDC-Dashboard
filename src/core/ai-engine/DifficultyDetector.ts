@@ -13,7 +13,13 @@
  */
 
 import { DIFFICULTY_THRESHOLD_LIGHT } from '../../shared/constants';
-import type { DifficultySignal, DifficultyType, GazeMetrics } from '../../shared/types';
+import type {
+  DetectorDebugPayload,
+  DetectorMode,
+  DifficultySignal,
+  DifficultyType,
+  GazeMetrics,
+} from '../../shared/types';
 import { clamp } from '../../shared/utils';
 import { Etdd70LogregModel } from './Etdd70LogregModel';
 
@@ -29,10 +35,34 @@ interface HeuristicBreakdown {
 export class DifficultyDetector {
   private readonly sessionId: string;
   private readonly trainedModel: Etdd70LogregModel;
+  private mode: DetectorMode = 'hybrid';
+  private lastDebug: DetectorDebugPayload = {
+    mode: 'hybrid',
+    heuristicScore: 0,
+    modelProbability: 0,
+    hybridScore: 0,
+    selectedScore: 0,
+    confidence: 0,
+    dominantType: 'attention',
+    triggered: false,
+    timestamp: Date.now(),
+  };
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
     this.trainedModel = new Etdd70LogregModel();
+  }
+
+  setMode(mode: DetectorMode): void {
+    this.mode = mode;
+  }
+
+  getMode(): DetectorMode {
+    return this.mode;
+  }
+
+  getLastDebug(): DetectorDebugPayload {
+    return { ...this.lastDebug };
   }
 
   infer(metrics: GazeMetrics): DifficultySignal | null {
@@ -48,15 +78,13 @@ export class DifficultyDetector {
     const modelWeight = 0.35;
     const heuristicWeight = 0.65;
 
-    const difficultyScore = clamp(
+    const hybridScore = clamp(
       heuristic.score * heuristicWeight + modelProbability * modelWeight,
       0,
       1
     );
 
-    if (difficultyScore < DIFFICULTY_THRESHOLD_LIGHT) {
-      return null;
-    }
+    const selectedScore = this.mode === 'hybrid' ? hybridScore : heuristic.score;
 
     const dominantType = this.classifyType({
       instabilityScore: heuristic.instabilityScore,
@@ -70,15 +98,33 @@ export class DifficultyDetector {
     const confidence = clamp(
       0.45 +
         modelAgreement * 0.25 +
-        difficultyScore * 0.20 +
+        selectedScore * 0.20 +
         (1 - metrics.trackingLossRate) * 0.10,
       0,
       1
     );
 
+    const triggered = selectedScore >= DIFFICULTY_THRESHOLD_LIGHT;
+
+    this.lastDebug = {
+      mode: this.mode,
+      heuristicScore: heuristic.score,
+      modelProbability,
+      hybridScore,
+      selectedScore,
+      confidence,
+      dominantType,
+      triggered,
+      timestamp: Date.now(),
+    };
+
+    if (!triggered) {
+      return null;
+    }
+
     return {
       type: dominantType,
-      level: difficultyScore,
+      level: selectedScore,
       confidence,
       language: 'fr',
       timestamp: Date.now(),

@@ -14,7 +14,14 @@ import { useBilingual }        from '../hooks/useBilingual';
 import { AdaptationIndicator } from './AdaptationIndicator';
 import { ReadingProgress }     from './ReadingProgress';
 import { EventBus }            from '../../core/event-bus/EventBus';
-import type { AdaptationParams, GazePointData, StudentProfile, TeacherText } from '../../shared/types';
+import type {
+  AdaptationParams,
+  DetectorDebugPayload,
+  DetectorMode,
+  GazePointData,
+  StudentProfile,
+  TeacherText,
+} from '../../shared/types';
 
 
 interface AdaptiveReaderProps {
@@ -23,6 +30,8 @@ interface AdaptiveReaderProps {
   sessionId:     string;
   onSessionEnd?: (wordsRead: number) => void;
 }
+
+const DETECTOR_MODE_STORAGE_KEY = 'qs_detector_mode';
 
 // ── Durée max selon l'âge ─────────────────────────────────────────────────────
 function getMaxDuration(age: number): number {
@@ -36,6 +45,11 @@ function formatTime(ms: number): string {
   const min = Math.floor(ms / 60000);
   const sec = Math.floor((ms % 60000) / 1000);
   return `${min}:${sec.toString().padStart(2, '0')}`;
+}
+
+function formatScore(score: number | undefined): string {
+  if (typeof score !== 'number' || Number.isNaN(score)) return '--';
+  return score.toFixed(3);
 }
 
 type ReaderAidLevel = 'LOW' | 'MEDIUM' | 'HIGH';
@@ -260,6 +274,15 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
   const [activePara, setActivePara] = useState(0);
   const [elapsed,    setElapsed]    = useState(0);
   const [gazePoint,  setGazePoint]  = useState<{ x: number; y: number; confidence: number } | null>(null);
+  const [detectorMode, setDetectorMode] = useState<DetectorMode>(() => {
+    try {
+      const stored = localStorage.getItem(DETECTOR_MODE_STORAGE_KEY);
+      return stored === 'heuristic' ? 'heuristic' : 'hybrid';
+    } catch {
+      return 'hybrid';
+    }
+  });
+  const [detectorDebug, setDetectorDebug] = useState<DetectorDebugPayload | null>(null);
 
   const maxDuration = getMaxDuration(profile.age);
 
@@ -322,7 +345,18 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
     startTimeRef.current = Date.now();
     updateForText(text.content);
     await startTracking();
-  }, [startTracking, text.content, updateForText]);
+    EventBus.emit('detector:mode', { mode: detectorMode }, sessionId);
+  }, [detectorMode, sessionId, startTracking, text.content, updateForText]);
+
+  const handleDetectorModeChange = useCallback((mode: DetectorMode) => {
+    setDetectorMode(mode);
+    try {
+      localStorage.setItem(DETECTOR_MODE_STORAGE_KEY, mode);
+    } catch {
+      // Ignore storage errors in private mode contexts.
+    }
+    EventBus.emit('detector:mode', { mode }, sessionId);
+  }, [sessionId]);
 
   const goNext = useCallback(() => {
     if (activePara === paragraphs.length - 1) {
@@ -361,6 +395,20 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
     return () => {
       unsub();
       setGazePoint(null);
+    };
+  }, [started, ended, sessionId]);
+
+  useEffect(() => {
+    if (!started || ended) return;
+
+    const unsub = EventBus.on<DetectorDebugPayload>('detector:debug', (event) => {
+      if (event.sessionId !== sessionId) return;
+      setDetectorDebug(event.payload);
+    });
+
+    return () => {
+      unsub();
+      setDetectorDebug(null);
     };
   }, [started, ended, sessionId]);
 
@@ -462,6 +510,95 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
           }}
         />
         {aidTone.label}
+      </div>
+
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+        gap: 10,
+        marginBottom: '0.75rem',
+      }}>
+        <div style={{
+          border: '1px solid #D7E6F2',
+          borderRadius: 10,
+          padding: '0.6rem 0.75rem',
+          background: '#F7FBFF',
+        }}>
+          <div style={{ fontSize: '0.72rem', color: '#4B6A83', marginBottom: 6, fontWeight: 600 }}>
+            Mode de détection (runtime)
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              onClick={() => handleDetectorModeChange('heuristic')}
+              style={{
+                flex: 1,
+                border: detectorMode === 'heuristic' ? '1px solid #085041' : '1px solid #BFD5C8',
+                background: detectorMode === 'heuristic' ? '#E1F5EE' : '#FFFFFF',
+                color: '#085041',
+                borderRadius: 8,
+                padding: '0.35rem 0.4rem',
+                fontSize: '0.75rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Heuristic
+            </button>
+            <button
+              onClick={() => handleDetectorModeChange('hybrid')}
+              style={{
+                flex: 1,
+                border: detectorMode === 'hybrid' ? '1px solid #085041' : '1px solid #BFD5C8',
+                background: detectorMode === 'hybrid' ? '#E1F5EE' : '#FFFFFF',
+                color: '#085041',
+                borderRadius: 8,
+                padding: '0.35rem 0.4rem',
+                fontSize: '0.75rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Hybrid model
+            </button>
+          </div>
+        </div>
+
+        <div style={{
+          border: '1px solid #E5E2D7',
+          borderRadius: 10,
+          padding: '0.6rem 0.75rem',
+          background: '#FFFDF8',
+        }}>
+          <div style={{ fontSize: '0.72rem', color: '#6E6653', marginBottom: 6, fontWeight: 600 }}>
+            Debug score panel
+          </div>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            gap: 6,
+            fontSize: '0.74rem',
+            color: '#4C463A',
+          }}>
+            <div style={{ background: '#F3F8FF', borderRadius: 6, padding: '0.35rem 0.45rem' }}>
+              Heuristic: <strong>{formatScore(detectorDebug?.heuristicScore)}</strong>
+            </div>
+            <div style={{ background: '#F3F8FF', borderRadius: 6, padding: '0.35rem 0.45rem' }}>
+              Hybrid: <strong>{formatScore(detectorDebug?.hybridScore)}</strong>
+            </div>
+            <div style={{ background: '#FFF7EA', borderRadius: 6, padding: '0.35rem 0.45rem' }}>
+              Model p: <strong>{formatScore(detectorDebug?.modelProbability)}</strong>
+            </div>
+            <div style={{ background: '#FFF7EA', borderRadius: 6, padding: '0.35rem 0.45rem' }}>
+              Final: <strong>{formatScore(detectorDebug?.adjustedScore ?? detectorDebug?.selectedScore)}</strong>
+            </div>
+          </div>
+          <div style={{ marginTop: 6, fontSize: '0.72rem', color: '#6E6653' }}>
+            Type: <strong>{detectorDebug?.dominantType ?? '--'}</strong> · Trigger:
+            <strong style={{ color: detectorDebug?.triggered ? '#0F6E56' : '#8A8880', marginLeft: 3 }}>
+              {detectorDebug?.triggered ? 'ON' : 'OFF'}
+            </strong>
+          </div>
+        </div>
       </div>
 
       <ReadingProgress textLength={text.content.length} containerRef={containerRef} />

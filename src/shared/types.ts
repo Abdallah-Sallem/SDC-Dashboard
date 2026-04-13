@@ -76,6 +76,23 @@ export interface DifficultySignal {
   timestamp:  number;
 }
 
+export type DetectorMode = 'heuristic' | 'hybrid';
+
+export interface DetectorDebugPayload {
+  mode: DetectorMode;
+  heuristicScore: number;
+  modelProbability: number;
+  hybridScore: number;
+  selectedScore: number;
+  adjustedScore?: number;
+  confidence: number;
+  dominantType: DifficultyType;
+  triggered: boolean;
+  currentLevel?: AdaptiveDifficultyLevel;
+  nextLevel?: AdaptiveDifficultyLevel;
+  timestamp: number;
+}
+
 export type AdaptiveDifficultyLevel = 'none' | 'light' | 'moderate' | 'strong';
 
 export interface AdaptiveLoopOutput {
@@ -106,6 +123,8 @@ export type QalamEventType =
   | 'gaze:metrics'
   | 'tracking_lost'
   | 'difficulty:detected'
+  | 'detector:mode'
+  | 'detector:debug'
   | 'adaptive:output'
   | 'adaptation:apply'
   | 'adaptation:reset'
