@@ -1,6 +1,8 @@
 /**
  * DifficultyDetector.ts
- * V0 heuristic detector inspired by ETDD70 behavioral patterns.
+ * Hybrid detector for V0:
+ * - Heuristic behavioral score (stable in real-time)
+ * - ETDD70-trained logistic probability (data-driven signal)
  *
  * It combines:
  * - fixation instability (jitter)
@@ -13,15 +15,77 @@
 import { DIFFICULTY_THRESHOLD_LIGHT } from '../../shared/constants';
 import type { DifficultySignal, DifficultyType, GazeMetrics } from '../../shared/types';
 import { clamp } from '../../shared/utils';
+import { Etdd70LogregModel } from './Etdd70LogregModel';
+
+interface HeuristicBreakdown {
+  score: number;
+  instabilityScore: number;
+  longFixationScore: number;
+  regressionScore: number;
+  blinkScore: number;
+  trackingScore: number;
+}
 
 export class DifficultyDetector {
   private readonly sessionId: string;
+  private readonly trainedModel: Etdd70LogregModel;
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
+    this.trainedModel = new Etdd70LogregModel();
   }
 
   infer(metrics: GazeMetrics): DifficultySignal | null {
+    const heuristic = this.computeHeuristic(metrics);
+
+    let modelProbability = 0;
+    try {
+      modelProbability = this.trainedModel.predictProbability(metrics);
+    } catch {
+      modelProbability = heuristic.score;
+    }
+
+    const modelWeight = 0.35;
+    const heuristicWeight = 0.65;
+
+    const difficultyScore = clamp(
+      heuristic.score * heuristicWeight + modelProbability * modelWeight,
+      0,
+      1
+    );
+
+    if (difficultyScore < DIFFICULTY_THRESHOLD_LIGHT) {
+      return null;
+    }
+
+    const dominantType = this.classifyType({
+      instabilityScore: heuristic.instabilityScore,
+      longFixationScore: heuristic.longFixationScore,
+      regressionScore: heuristic.regressionScore,
+      blinkScore: heuristic.blinkScore,
+      trackingScore: heuristic.trackingScore,
+    });
+
+    const modelAgreement = 1 - Math.abs(modelProbability - heuristic.score);
+    const confidence = clamp(
+      0.45 +
+        modelAgreement * 0.25 +
+        difficultyScore * 0.20 +
+        (1 - metrics.trackingLossRate) * 0.10,
+      0,
+      1
+    );
+
+    return {
+      type: dominantType,
+      level: difficultyScore,
+      confidence,
+      language: 'fr',
+      timestamp: Date.now(),
+    };
+  }
+
+  private computeHeuristic(metrics: GazeMetrics): HeuristicBreakdown {
     const instabilityScore = clamp(metrics.fixationInstability / 42, 0, 1);
 
     const longFixationScore =
@@ -39,7 +103,7 @@ export class DifficultyDetector {
       1
     );
 
-    const difficultyScore = clamp(
+    const score = clamp(
       instabilityScore * 0.28 +
         longFixationScore * 0.30 +
         regressionScore * 0.22 +
@@ -49,30 +113,13 @@ export class DifficultyDetector {
       1
     );
 
-    if (difficultyScore < DIFFICULTY_THRESHOLD_LIGHT) {
-      return null;
-    }
-
-    const dominantType = this.classifyType({
+    return {
+      score,
       instabilityScore,
       longFixationScore,
       regressionScore,
       blinkScore,
       trackingScore,
-    });
-
-    const confidence = clamp(
-      0.5 + difficultyScore * 0.35 + (1 - metrics.trackingLossRate) * 0.15,
-      0,
-      1
-    );
-
-    return {
-      type: dominantType,
-      level: difficultyScore,
-      confidence,
-      language: 'fr',
-      timestamp: Date.now(),
     };
   }
 

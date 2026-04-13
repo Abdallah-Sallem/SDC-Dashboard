@@ -1,0 +1,70 @@
+{
+  "model_name": "etdd70_logreg_v0",
+  "task": "dyslexia_proxy_probability",
+  "feature_names": [
+    "fixation_duration_ms",
+    "regression_count",
+    "saccade_speed_proxy",
+    "line_skip_rate"
+  ],
+  "coefficients": [
+    0.9652987983485286,
+    1.2471654908640968,
+    -0.042873073900859655,
+    0.0
+  ],
+  "intercept": 0.19678660551655316,
+  "scaler_mean": [
+    524.0381671156598,
+    23.724358974358974,
+    2.3057263250580484,
+    0.0
+  ],
+  "scaler_scale": [
+    147.22360574559454,
+    13.293324774616963,
+    0.8669494092712831,
+    1.0
+  ],
+  "feature_ranges": {
+    "fixation_duration_ms": {
+      "min": 256.38121518986577,
+      "max": 1064.181010460254
+    },
+    "regression_count": {
+      "min": 7.0,
+      "max": 127.0
+    },
+    "saccade_speed_proxy": {
+      "min": 0.7257775995557328,
+      "max": 5.24531713207763
+    },
+    "line_skip_rate": {
+      "min": 0.0,
+      "max": 0.0
+    }
+  },
+  "metrics": {
+    "train": {
+      "accuracy": 0.75,
+      "f1": 0.7547169811320755,
+      "roc_auc": 0.8299588477366254
+    },
+    "test": {
+      "accuracy": 0.8148148148148148,
+      "f1": 0.782608695652174,
+      "roc_auc": 0.8861111111111111
+    }
+  },
+  "dataset": {
+    "rows": 210,
+    "subjects": 70,
+    "train_rows": 156,
+    "test_rows": 54,
+    "positive_ratio": 0.5
+  },
+  "notes": [
+    "Features map ETDD70 trial metrics to real-time proxies.",
+    "Probability output is used as one signal in the live difficulty score."
+  ]
+}
