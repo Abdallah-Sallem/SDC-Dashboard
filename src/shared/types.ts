@@ -40,6 +40,13 @@ export interface GazePointData {
   y: number;
   timestamp: number;
   confidence: number;
+  normalizedX?: number;
+  normalizedY?: number;
+  velocity?: number;
+  blinkRate?: number;
+  headStability?: number;
+  trackingLossRate?: number;
+  fixationInstability?: number;
 }
 
 export type TrackingLostReason = 'face_lost' | 'camera_off';
@@ -52,9 +59,17 @@ export interface TrackingLostPayload {
 export interface GazeMetrics {
   saccadeSpeed:     number;
   fixationDuration: number;
+  fixationDurationVariance?: number;
   regressionCount:  number;
+  regressionFrequency?: number;
   blinkRate:        number;
   lineSkipRate:     number;
+  microSaccadeIntensity?: number;
+  gazeDispersion?: number;
+  gazeStability?: number;
+  fixationInstability: number;
+  headStability: number;
+  trackingLossRate: number;
   timestamp:        number;
 }
 
@@ -67,6 +82,34 @@ export interface DifficultySignal {
   confidence: number;
   language:   ReadingLanguage;
   timestamp:  number;
+}
+
+export type DetectorMode = 'heuristic' | 'hybrid';
+
+export interface DetectorDebugPayload {
+  mode: DetectorMode;
+  heuristicScore: number;
+  modelProbability: number;
+  hybridScore: number;
+  selectedScore: number;
+  adjustedScore?: number;
+  confidence: number;
+  dominantType: DifficultyType;
+  triggered: boolean;
+  triggerThreshold?: number;
+  releaseThreshold?: number;
+  baselineMean?: number;
+  baselineStd?: number;
+  calibrationReady?: boolean;
+  activationDebounce?: number;
+  releaseDebounce?: number;
+  fixationVariance?: number;
+  microSaccadeIntensity?: number;
+  gazeDispersion?: number;
+  gazeStability?: number;
+  currentLevel?: AdaptiveDifficultyLevel;
+  nextLevel?: AdaptiveDifficultyLevel;
+  timestamp: number;
 }
 
 export type AdaptiveDifficultyLevel = 'none' | 'light' | 'moderate' | 'strong';
@@ -99,6 +142,8 @@ export type QalamEventType =
   | 'gaze:metrics'
   | 'tracking_lost'
   | 'difficulty:detected'
+  | 'detector:mode'
+  | 'detector:debug'
   | 'adaptive:output'
   | 'adaptation:apply'
   | 'adaptation:reset'

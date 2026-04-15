@@ -9,6 +9,8 @@
     GazeMetrics,
    TrackingLostPayload,
     DifficultySignal,
+    DetectorDebugPayload,
+    DetectorMode,
    AdaptiveLoopOutput,
     AdaptationParams,
     StudentProfile,
@@ -37,6 +39,16 @@
     difficultyDetected: (signal: DifficultySignal) => ({
       type: 'difficulty:detected' as const,
       payload: signal,
+    }),
+
+    detectorMode: (mode: DetectorMode) => ({
+      type: 'detector:mode' as const,
+      payload: { mode },
+    }),
+
+    detectorDebug: (payload: DetectorDebugPayload) => ({
+      type: 'detector:debug' as const,
+      payload,
     }),
 
     adaptiveOutput: (output: AdaptiveLoopOutput) => ({

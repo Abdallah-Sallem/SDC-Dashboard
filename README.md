@@ -178,6 +178,15 @@ This architecture enables local-first prototyping without a backend dependency.
 - `npm run dev`: start Vite dev server.
 - `npm run build`: compile TypeScript and build production assets.
 - `npm run preview`: serve the production build locally.
+- `npm run train:model`: train the ETDD70 logistic model and export JSON artifacts for runtime use.
+
+## ETDD70 model artifacts
+
+- Training entry point: `ml/train_etdd70_logreg.py`
+- Training artifact output: `ml/artifacts/etdd70_logreg_v0.json`
+- Runtime artifact consumed by the app: `src/core/ai-engine/model/etdd70_logreg_v0.json`
+
+The trainer expects the dataset folder `13332134/` to be a sibling of `qalam_sense_baya/`.
 
 ## Known gaps and next steps
 

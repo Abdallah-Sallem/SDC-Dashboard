@@ -6,9 +6,11 @@
     "scripts": {
         "dev": "vite",
         "build": "tsc && vite build",
-        "preview": "vite preview"
+        "preview": "vite preview",
+        "train:model": "python ml/train_etdd70_logreg.py"
     },
     "dependencies": {
+        "@mediapipe/face_mesh": "^0.4.1633559619",
         "i18next": "^23.0.0",
         "react-i18next": "^14.0.0"
     },

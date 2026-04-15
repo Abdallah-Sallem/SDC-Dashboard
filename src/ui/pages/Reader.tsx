@@ -142,10 +142,10 @@ export const Reader: React.FC<ReaderPageProps> = ({ profile, text, onExit }) => 
           fontSize: '0.82rem', color: '#5F5E5A',
           display: 'flex', alignItems: 'center', gap: 8,
         }}>
-          <span>📷</span>
+          <span>ℹ️</span>
           <span>
-            Le suivi oculaire est désactivé. Le parent doit autoriser la caméra
-            depuis l'<strong>espace parent</strong> pour activer cette fonctionnalité.
+            Le consentement parental eye-tracking n'est pas enregistré. Au démarrage,
+            le navigateur peut quand même demander l'accès caméra pour cette session.
           </span>
         </div>
       )}

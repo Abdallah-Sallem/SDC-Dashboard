@@ -60,6 +60,9 @@
        regressionCount: this.regressionCount,
        blinkRate: this.estimateBlinkRate(),
        lineSkipRate: this.computeLineSkipRate(frames),
+      fixationInstability: 0,
+      headStability: 1,
+      trackingLossRate: 0,
        timestamp: Date.now(),
      };
    }
