@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QalamTracker Demo</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: radial-gradient(circle at top, #1f2b3d 0%, #0d1117 55%, #06090f 100%);
+        color: #e6edf7;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        display: grid;
+        place-items: center;
+        padding: 20px;
+        box-sizing: border-box;
+      }
+
+      .panel {
+        width: min(980px, 100%);
+        display: grid;
+        gap: 14px;
+      }
+
+      .stage {
+        position: relative;
+        width: min(920px, 100%);
+        aspect-ratio: 4 / 3;
+        border: 1px solid rgba(173, 203, 255, 0.25);
+        border-radius: 14px;
+        overflow: hidden;
+        box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
+        background: #080d16;
+      }
+
+      video,
+      canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      canvas {
+        pointer-events: none;
+      }
+
+      .controls {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      button {
+        border: 0;
+        border-radius: 9px;
+        background: #276ef1;
+        color: white;
+        font-weight: 600;
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+
+      button[disabled] {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      #state {
+        margin: 0;
+        background: rgba(6, 15, 30, 0.72);
+        border: 1px solid rgba(130, 167, 226, 0.3);
+        border-radius: 10px;
+        padding: 12px;
+        font-size: 13px;
+        line-height: 1.4;
+        overflow: auto;
+        min-height: 120px;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="panel">
+      <div class="stage">
+        <video id="webcam" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+      </div>
+
+      <div class="controls">
+        <button id="startBtn">Start Tracker</button>
+        <button id="stopBtn" disabled>Stop Tracker</button>
+      </div>
+
+      <pre id="state">Tracker not started.</pre>
+    </section>
+
+    <script type="module">
+      import { QalamTracker } from '/src/core/eye-tracking/QalamTracker.js';
+
+      const video = document.getElementById('webcam');
+      const overlay = document.getElementById('overlay');
+      const stateEl = document.getElementById('state');
+      const startBtn = document.getElementById('startBtn');
+      const stopBtn = document.getElementById('stopBtn');
+
+      let tracker = null;
+      let stateTimer = 0;
+
+      async function startTracking() {
+        if (tracker) return;
+
+        tracker = new QalamTracker(video, {
+          fpsTarget: 30,
+          smoothingFactor: 0.22,
+          windowMs: 500,
+          debug: true,
+          debugCanvas: overlay,
+          weights: {
+            backtrack: 0.4,
+            volatility: 0.35,
+            stagnation: 0.25,
+          },
+        });
+
+        await tracker.init();
+        await tracker.start();
+
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+
+        stateTimer = window.setInterval(() => {
+          if (!tracker) return;
+          const current = tracker.getCurrentState();
+          stateEl.textContent = JSON.stringify(current, null, 2);
+        }, 100);
+      }
+
+      function stopTracking() {
+        if (!tracker) return;
+
+        tracker.stop();
+        tracker = null;
+
+        if (stateTimer) {
+          window.clearInterval(stateTimer);
+          stateTimer = 0;
+        }
+
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        stateEl.textContent = 'Tracker stopped.';
+      }
+
+      startBtn.addEventListener('click', () => {
+        startTracking().catch((error) => {
+          stateEl.textContent = `Start failed: ${error.message}`;
+          stopTracking();
+        });
+      });
+
+      stopBtn.addEventListener('click', stopTracking);
+
+      window.addEventListener('beforeunload', () => {
+        stopTracking();
+      });
+    </script>
+  </body>
+</html>
