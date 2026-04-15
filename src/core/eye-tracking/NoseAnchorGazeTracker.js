@@ -18,6 +18,8 @@ import { FaceMesh } from '@mediapipe/face_mesh';
 const NOSE_NASION_INDEX = 168;
 const LEFT_IRIS_INDEXES = [468, 469, 470, 471, 472];
 const RIGHT_IRIS_INDEXES = [473, 474, 475, 476, 477];
+const EYE_DOMINANCE_X = 1.22;
+const EYE_DOMINANCE_Y = 1.14;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -195,7 +197,7 @@ export class NoseAnchorGazeTracker {
     const leftIris = averagePoint(landmarks, LEFT_IRIS_INDEXES);
     const rightIris = averagePoint(landmarks, RIGHT_IRIS_INDEXES);
 
-    if (!nose || !leftIris || !rightIris) {
+    if (!nose || (!leftIris && !rightIris)) {
       this.emitTrackingLost();
       return;
     }
@@ -203,11 +205,25 @@ export class NoseAnchorGazeTracker {
     const sourceWidth = this.videoEl.videoWidth || 640;
     const sourceHeight = this.videoEl.videoHeight || 480;
 
-    const eyeCenterX = (leftIris.x + rightIris.x) * 0.5;
-    const eyeCenterY = (leftIris.y + rightIris.y) * 0.5;
+    let relativeNormX = 0;
+    let relativeNormY = 0;
 
-    const relativeNormX = eyeCenterX - nose.x;
-    const relativeNormY = eyeCenterY - nose.y;
+    if (leftIris && rightIris) {
+      const leftRelX = leftIris.x - nose.x;
+      const leftRelY = leftIris.y - nose.y;
+      const rightRelX = rightIris.x - nose.x;
+      const rightRelY = rightIris.y - nose.y;
+
+      const symmetry = 1 - clamp(Math.abs(leftRelX - rightRelX) / 0.09, 0, 1);
+      const symmetryBoost = 1 + symmetry * 0.18;
+
+      relativeNormX = ((leftRelX + rightRelX) * 0.5) * EYE_DOMINANCE_X * symmetryBoost;
+      relativeNormY = ((leftRelY + rightRelY) * 0.5) * EYE_DOMINANCE_Y;
+    } else {
+      const eye = leftIris || rightIris;
+      relativeNormX = (eye.x - nose.x) * EYE_DOMINANCE_X * 0.94;
+      relativeNormY = (eye.y - nose.y) * EYE_DOMINANCE_Y * 0.94;
+    }
 
     let rawX = relativeNormX * sourceWidth * this.gainX;
     let rawY = relativeNormY * sourceHeight * this.gainY;

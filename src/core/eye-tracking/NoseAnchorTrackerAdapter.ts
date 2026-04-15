@@ -21,6 +21,7 @@ interface PermissionResult {
 
 const RELATIVE_TO_NORM_X = 0.043;
 const RELATIVE_TO_NORM_Y = 0.052;
+const HORIZONTAL_DIRECTION = -1;
 const BASELINE_BOOTSTRAP_ALPHA = 0.18;
 const BASELINE_ADAPT_ALPHA = 0.02;
 const BASELINE_LOCK_RADIUS_PX = 7;
@@ -92,12 +93,12 @@ export class NoseAnchorTrackerAdapter {
       this.videoEl = await this.createHiddenVideo(this.mediaStream);
       this.tracker = new NoseAnchorGazeTracker(this.videoEl, {
         onUpdate: (output) => this.handleUpdate(output),
-        baseAlpha: 0.2,
-        fastAlpha: 0.46,
+        baseAlpha: 0.18,
+        fastAlpha: 0.52,
         velocityThresholdPx: 11,
         maxJumpPx: 95,
-        gainX: 1.0,
-        gainY: 1.0,
+        gainX: 1.18,
+        gainY: 1.12,
         minDetectionConfidence: 0.55,
         minTrackingConfidence: 0.55,
         selfieMode: true,
@@ -305,7 +306,7 @@ export class NoseAnchorTrackerAdapter {
     const deltaX = relative.x - baseline.x;
     const deltaY = relative.y - baseline.y;
 
-    const normalizedX = clamp(0.5 + deltaX * RELATIVE_TO_NORM_X, 0, 1);
+    const normalizedX = clamp(0.5 + HORIZONTAL_DIRECTION * deltaX * RELATIVE_TO_NORM_X, 0, 1);
     const normalizedY = clamp(0.5 + deltaY * RELATIVE_TO_NORM_Y, 0, 1);
 
     const screenX = normalizedX * window.innerWidth;

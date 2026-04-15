@@ -14,6 +14,13 @@ import { useBilingual }        from '../hooks/useBilingual';
 import { AdaptationIndicator } from './AdaptationIndicator';
 import { ReadingProgress }     from './ReadingProgress';
 import { EventBus }            from '../../core/event-bus/EventBus';
+import {
+  detectStruggle,
+  expectedFixationDuration,
+  STRUGGLE_CONSTANTS,
+  type SaccadeSample,
+  type StruggleBand,
+} from '../../core/ai-engine/detectStruggle';
 import type {
   AdaptationParams,
   DetectorDebugPayload,
@@ -80,6 +87,76 @@ const CURSOR_DEADZONE_PX = 3;
 const CURSOR_MAX_STEP_PX = 62;
 const CURSOR_EMA_ALPHA = 0.22;
 const CURSOR_SETTLE_ALPHA = 0.18;
+
+const OUT_OF_TEXT_ZONE_TRIGGER_MS = 420;
+const PARAGRAPH_FOCUS_MIN_SCALE = 1;
+const PARAGRAPH_FOCUS_EARLY_SCALE = 1.06;
+const PARAGRAPH_FOCUS_HIGH_SCALE = 1.13;
+const PARAGRAPH_FOCUS_OUTSIDE_SCALE = 1.16;
+
+interface RuleDebugState {
+  score: number;
+  band: StruggleBand;
+  fixationDurationMs: number;
+  expectedFixationMs: number;
+  triggerFixationMs: number;
+  regressionCount: number;
+  velocityRejected: boolean;
+  outsideTextZone: boolean;
+}
+
+interface RuntimeStruggleState {
+  previousSample: CursorPoint | null;
+  previousSampleTs: number;
+  fixationWordId: string;
+  fixationWordStartTs: number;
+  meanFixationDurationMs: number;
+  saccades: SaccadeSample[];
+  outOfTextZoneStartTs: number;
+}
+
+function classifyBand(score: number): StruggleBand {
+  if (score >= 0.7) return 'high';
+  if (score >= 0.4) return 'early';
+  return 'smooth';
+}
+
+function estimateWordComplexity(word: string): number {
+  const letters = (word.match(/\p{L}/gu) ?? []).join('');
+  if (!letters) return 0.2;
+
+  const length = letters.length;
+  const normalizedLength = clamp((length - 4) / 8, 0, 1);
+
+  const complexClusters =
+    (letters.toLowerCase().match(/[bcdfghjklmnpqrstvwxyz]{3,}/g) ?? []).length;
+  const clusterScore = clamp(complexClusters * 0.2, 0, 0.45);
+
+  return clamp(normalizedLength + clusterScore, 0, 1);
+}
+
+function computeReaderOverride(
+  band: StruggleBand,
+  outsideTextZone: boolean
+): Partial<React.CSSProperties> {
+  if (outsideTextZone || band === 'high') {
+    return {
+      fontSize: 'calc(var(--qs-font-size) + 0.14rem)',
+      lineHeight: 2.25,
+      letterSpacing: '0.10em',
+      wordSpacing: '0.24em',
+    };
+  }
+
+  if (band === 'early') {
+    return {
+      letterSpacing: '0.05em',
+      wordSpacing: '0.12em',
+    };
+  }
+
+  return {};
+}
 
 function stabilizeCursor(prev: CursorPoint | null, incoming: CursorPoint): CursorPoint {
   if (!prev) return incoming;
@@ -192,7 +269,11 @@ const Word: React.FC<{ word: string; isDyslexic: boolean; isRTL: boolean; wordIn
 };
 
 const ReadingParagraph: React.FC<{
-  text: string; isDyslexic: boolean; isRTL: boolean; isActive: boolean; paragraphIndex: number;
+  text: string;
+  isDyslexic: boolean;
+  isRTL: boolean;
+  isActive: boolean;
+  paragraphIndex: number;
 }> = ({ text, isDyslexic, isRTL, isActive, paragraphIndex }) => (
   <p style={{
     marginBottom:  'var(--qs-paragraph-spacing, 1em)',
@@ -200,12 +281,12 @@ const ReadingParagraph: React.FC<{
     borderRadius:  6,
     background:    isActive ? 'rgba(29,158,117,0.07)' : 'transparent',
     borderLeft:    isActive ? '3px solid #1D9E75' : '3px solid transparent',
-    transition:    'background 0.3s, border-color 0.3s',
     cursor:        'pointer',
     lineHeight:    'var(--qs-line-height)',
     wordSpacing:   'var(--qs-word-spacing)',
     letterSpacing: 'var(--qs-letter-spacing)',
-  }}>
+    transition:    'background 0.3s, border-color 0.3s, letter-spacing 180ms ease, word-spacing 180ms ease',
+  }} data-paragraph-index={paragraphIndex}>
     {text.split(/(\s+)/).map((token, i) =>
       /^\s+$/.test(token)
         ? <span key={i}>{token}</span>
@@ -358,6 +439,16 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
     lastTargetUpdateAt: 0,
     rafId: null,
   });
+  const gazePointRef = useRef<CursorPoint | null>(null);
+  const struggleRuntimeRef = useRef<RuntimeStruggleState>({
+    previousSample: null,
+    previousSampleTs: 0,
+    fixationWordId: '',
+    fixationWordStartTs: 0,
+    meanFixationDurationMs: 280,
+    saccades: [],
+    outOfTextZoneStartTs: 0,
+  });
 
   const [started,    setStarted]    = useState(false);
   const [ended,      setEnded]      = useState(false);
@@ -365,6 +456,20 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
   const [activePara, setActivePara] = useState(0);
   const [elapsed,    setElapsed]    = useState(0);
   const [gazePoint,  setGazePoint]  = useState<CursorPoint | null>(null);
+  const [paragraphFocusScale, setParagraphFocusScale] = useState(PARAGRAPH_FOCUS_MIN_SCALE);
+  const [combinedStruggleScore, setCombinedStruggleScore] = useState(0);
+  const [combinedStruggleBand, setCombinedStruggleBand] = useState<StruggleBand>('smooth');
+  const [ruleDebugState, setRuleDebugState] = useState<RuleDebugState>({
+    score: 0,
+    band: 'smooth',
+    fixationDurationMs: 0,
+    expectedFixationMs: expectedFixationDuration(4),
+    triggerFixationMs:
+      expectedFixationDuration(4) * STRUGGLE_CONSTANTS.FIXATION_TRIGGER_MULTIPLIER,
+    regressionCount: 0,
+    velocityRejected: false,
+    outsideTextZone: false,
+  });
   const [detectorMode, setDetectorMode] = useState<DetectorMode>(() => {
     try {
       const stored = localStorage.getItem(DETECTOR_MODE_STORAGE_KEY);
@@ -388,15 +493,29 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
   const { direction, isRTL, updateForText } = useBilingual(text.content);
 
   const aidLevel = useMemo(() => inferAidLevel(currentParams), [currentParams]);
+  const paragraphs = text.content.split(/\n\n+/).filter(p => p.trim().length > 0);
+  const totalWords = text.content.split(/\s+/).length;
+  const modelScore = detectorDebug?.adjustedScore ?? detectorDebug?.selectedScore ?? 0;
+  const effectiveAidLevel: ReaderAidLevel =
+    combinedStruggleBand === 'high' || ruleDebugState.outsideTextZone
+      ? 'HIGH'
+      : combinedStruggleBand === 'early' && aidLevel === 'LOW'
+        ? 'MEDIUM'
+        : aidLevel;
+  const readerOverride = useMemo(
+    () => computeReaderOverride(combinedStruggleBand, ruleDebugState.outsideTextZone),
+    [combinedStruggleBand, ruleDebugState.outsideTextZone]
+  );
+
   const aidTone = useMemo(() => {
-    if (aidLevel === 'HIGH') {
+    if (effectiveAidLevel === 'HIGH') {
       return {
         label: 'Niveau HIGH: texte agrandi + espacement + aide couleur',
         bg: '#EAF4FF',
         fg: '#0F2A43',
       };
     }
-    if (aidLevel === 'MEDIUM') {
+    if (effectiveAidLevel === 'MEDIUM') {
       return {
         label: 'Niveau MEDIUM: espacement légèrement augmenté',
         bg: '#FFF6E8',
@@ -408,10 +527,7 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
       bg: '#F8F7F4',
       fg: '#5F5E5A',
     };
-  }, [aidLevel]);
-
-  const paragraphs = text.content.split(/\n\n+/).filter(p => p.trim().length > 0);
-  const totalWords = text.content.split(/\s+/).length;
+  }, [effectiveAidLevel]);
 
   // Timer
   useEffect(() => {
@@ -455,9 +571,20 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
     } else {
       setActivePara(p => p + 1);
     }
+    setParagraphFocusScale(PARAGRAPH_FOCUS_MIN_SCALE);
   }, [activePara, paragraphs.length, handleEnd]);
 
-  const goPrev = useCallback(() => setActivePara(p => Math.max(p - 1, 0)), []);
+  const goPrev = useCallback(() => {
+    setActivePara(p => Math.max(p - 1, 0));
+    setParagraphFocusScale(PARAGRAPH_FOCUS_MIN_SCALE);
+  }, []);
+
+  useEffect(() => {
+    const runtime = struggleRuntimeRef.current;
+    runtime.fixationWordId = '';
+    runtime.fixationWordStartTs = 0;
+    runtime.outOfTextZoneStartTs = 0;
+  }, [activePara]);
 
   useEffect(() => {
     if (!started || ended) return;
@@ -476,32 +603,169 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
     const unsub = EventBus.on<GazePointData>('gaze:point', (event) => {
       if (event.sessionId !== sessionId) return;
 
+      const now = event.payload.timestamp ?? Date.now();
+      const runtime = struggleRuntimeRef.current;
+
       const incoming: CursorPoint = {
         x: event.payload.x,
         y: event.payload.y,
         confidence: event.payload.confidence,
       };
 
+      const velocity = event.payload.velocity ?? 0;
+
+      let nextGazePoint: CursorPoint | null = null;
+
       if (incoming.confidence < CURSOR_MIN_CONFIDENCE) {
-        setGazePoint((prev) =>
-          prev
-            ? {
-                ...prev,
-                confidence: clamp(prev.confidence * 0.90, 0, 1),
-              }
-            : null
-        );
+        const prev = gazePointRef.current;
+        nextGazePoint = prev
+          ? {
+              ...prev,
+              confidence: clamp(prev.confidence * 0.90, 0, 1),
+            }
+          : null;
+
+        gazePointRef.current = nextGazePoint;
+        setGazePoint(nextGazePoint);
         return;
       }
 
-      setGazePoint((prev) => stabilizeCursor(prev, incoming));
+      nextGazePoint = stabilizeCursor(gazePointRef.current, incoming);
+      gazePointRef.current = nextGazePoint;
+      setGazePoint(nextGazePoint);
+
+      if (!nextGazePoint || !containerRef.current) return;
+
+      if (runtime.previousSample) {
+        runtime.saccades.push({
+          dx: nextGazePoint.x - runtime.previousSample.x,
+          timestamp: now,
+        });
+        if (runtime.saccades.length > 16) {
+          runtime.saccades.splice(0, runtime.saccades.length - 16);
+        }
+      }
+
+      runtime.previousSample = nextGazePoint;
+      runtime.previousSampleTs = now;
+
+      const readingRect = containerRef.current.getBoundingClientRect();
+      const insideTextZone =
+        nextGazePoint.x >= readingRect.left &&
+        nextGazePoint.x <= readingRect.right &&
+        nextGazePoint.y >= readingRect.top &&
+        nextGazePoint.y <= readingRect.bottom;
+
+      if (!insideTextZone && nextGazePoint.confidence >= 0.6) {
+        if (runtime.outOfTextZoneStartTs === 0) {
+          runtime.outOfTextZoneStartTs = now;
+        }
+      } else {
+        runtime.outOfTextZoneStartTs = 0;
+      }
+
+      const outsideTextZone =
+        runtime.outOfTextZoneStartTs > 0 &&
+        now - runtime.outOfTextZoneStartTs >= OUT_OF_TEXT_ZONE_TRIGGER_MS;
+
+      const hoveredElement = document.elementFromPoint(nextGazePoint.x, nextGazePoint.y) as HTMLElement | null;
+      const paragraphAnchor = hoveredElement?.closest('[data-paragraph-index]') as HTMLElement | null;
+      const paragraphIndex = paragraphAnchor ? Number(paragraphAnchor.dataset.paragraphIndex) : -1;
+
+      const hoveredWordElement =
+        paragraphIndex === activePara
+          ? (hoveredElement?.closest('.adaptive-word') as HTMLElement | null)
+          : null;
+
+      const hoveredWordId = hoveredWordElement?.id ?? '';
+      const hoveredWordText = hoveredWordElement?.textContent?.trim() ?? '';
+      const hoveredWordCharCount = Math.max(
+        1,
+        (hoveredWordText.match(/\p{L}/gu) ?? []).length || hoveredWordText.length || 1
+      );
+
+      let fixationDurationMs = 0;
+      if (hoveredWordId) {
+        if (runtime.fixationWordId !== hoveredWordId) {
+          if (runtime.fixationWordId && runtime.fixationWordStartTs > 0) {
+            const previousFixation = Math.max(0, now - runtime.fixationWordStartTs);
+            runtime.meanFixationDurationMs =
+              runtime.meanFixationDurationMs * 0.84 + previousFixation * 0.16;
+          }
+
+          runtime.fixationWordId = hoveredWordId;
+          runtime.fixationWordStartTs = now;
+        }
+
+        fixationDurationMs = Math.max(0, now - runtime.fixationWordStartTs);
+      } else {
+        runtime.fixationWordId = '';
+        runtime.fixationWordStartTs = 0;
+      }
+
+      const struggleResult = detectStruggle({
+        now,
+        fixationDurationMs,
+        wordCharCount: hoveredWordCharCount,
+        gazeVelocity: velocity,
+        meanFixationDurationMs: runtime.meanFixationDurationMs,
+        wordComplexity: estimateWordComplexity(hoveredWordText),
+        saccades: runtime.saccades,
+      });
+
+      const ruleScore = outsideTextZone ? 1 : struggleResult.score;
+      const ruleBand: StruggleBand = outsideTextZone ? 'high' : struggleResult.band;
+
+      const combinedScore = clamp(modelScore * 0.55 + ruleScore * 0.45, 0, 1);
+      const combinedBand: StruggleBand = outsideTextZone ? 'high' : classifyBand(combinedScore);
+
+      setRuleDebugState({
+        score: ruleScore,
+        band: ruleBand,
+        fixationDurationMs,
+        expectedFixationMs: struggleResult.expectedFixationDurationMs,
+        triggerFixationMs: struggleResult.fixationTriggerDurationMs,
+        regressionCount: struggleResult.regressionCount,
+        velocityRejected: struggleResult.velocityRejected,
+        outsideTextZone,
+      });
+
+      setCombinedStruggleScore((prev) => prev + (combinedScore - prev) * 0.30);
+      setCombinedStruggleBand((prev) => (prev === combinedBand ? prev : combinedBand));
+
+      const fixationTriggered = fixationDurationMs > struggleResult.fixationTriggerDurationMs;
+      let paragraphTargetScale = PARAGRAPH_FOCUS_MIN_SCALE;
+
+      if (outsideTextZone) {
+        paragraphTargetScale = PARAGRAPH_FOCUS_OUTSIDE_SCALE;
+      } else if (combinedBand === 'high') {
+        paragraphTargetScale = PARAGRAPH_FOCUS_HIGH_SCALE;
+      } else if (combinedBand === 'early' || fixationTriggered) {
+        paragraphTargetScale = PARAGRAPH_FOCUS_EARLY_SCALE;
+      }
+
+      if (fixationTriggered) {
+        paragraphTargetScale = Math.min(
+          PARAGRAPH_FOCUS_OUTSIDE_SCALE,
+          paragraphTargetScale + 0.02
+        );
+      }
+
+      setParagraphFocusScale((prev) =>
+        clamp(
+          Math.max(prev, paragraphTargetScale),
+          PARAGRAPH_FOCUS_MIN_SCALE,
+          PARAGRAPH_FOCUS_OUTSIDE_SCALE
+        )
+      );
     });
 
     return () => {
       unsub();
+      gazePointRef.current = null;
       setGazePoint(null);
     };
-  }, [started, ended, sessionId]);
+  }, [activePara, ended, modelScore, sessionId, started]);
 
   useEffect(() => {
     if (!started || ended) return;
@@ -522,14 +786,19 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
     if (!started || ended) return;
 
     const zoomState = zoomStateRef.current;
-    const score = detectorDebug?.adjustedScore ?? detectorDebug?.selectedScore ?? 0;
-    const triggerThreshold = detectorDebug?.triggerThreshold ?? 0.42;
+    const score = combinedStruggleScore;
+    const triggerThreshold = combinedStruggleBand === 'high' ? 0.58 : 0.42;
     const gazeStability = detectorDebug?.gazeStability ?? 1;
     const confidenceOk = (gazePoint?.confidence ?? 1) >= 0.55;
+    const outsideTextZone = ruleDebugState.outsideTextZone;
 
-    const shouldZoom = Boolean(detectorDebug?.triggered) && gazeStability >= ZOOM_STABILITY_MIN && confidenceOk;
+    const shouldZoom =
+      (combinedStruggleBand !== 'smooth' || outsideTextZone) &&
+      gazeStability >= ZOOM_STABILITY_MIN &&
+      confidenceOk;
+
     const targetScale = shouldZoom
-      ? scoreToZoom(score, triggerThreshold)
+      ? scoreToZoom(outsideTextZone ? 1 : score, triggerThreshold)
       : ZOOM_MIN_SCALE;
 
     const now = Date.now();
@@ -555,7 +824,7 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
         zoomState.originY += (boundedY - zoomState.originY) * ZOOM_ORIGIN_LERP;
       }
     }
-  }, [detectorDebug, ended, gazePoint, started]);
+  }, [combinedStruggleBand, combinedStruggleScore, detectorDebug, ended, gazePoint, ruleDebugState.outsideTextZone, started]);
 
   // Animation continue via requestAnimationFrame pour un zoom fluide sans saccades.
   useEffect(() => {
@@ -611,10 +880,10 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
 
   const readerStyle: React.CSSProperties = {
     fontFamily:      'var(--qs-font-family)',
-    fontSize:        'var(--qs-font-size)',
-    lineHeight:      'var(--qs-line-height)',
-    letterSpacing:   'var(--qs-letter-spacing)',
-    wordSpacing:     'var(--qs-word-spacing)',
+    fontSize:        readerOverride.fontSize ?? 'var(--qs-font-size)',
+    lineHeight:      readerOverride.lineHeight ?? 'var(--qs-line-height)',
+    letterSpacing:   readerOverride.letterSpacing ?? 'var(--qs-letter-spacing)',
+    wordSpacing:     readerOverride.wordSpacing ?? 'var(--qs-word-spacing)',
     backgroundColor: 'var(--qs-bg-color)',
     color:           'var(--qs-text-color)',
     direction,
@@ -658,7 +927,7 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
 
   return (
     <div style={{ position: 'relative' }}>
-      <AdaptationIndicator isActive={adapterActive && aidLevel !== 'LOW'} />
+      <AdaptationIndicator isActive={adapterActive && effectiveAidLevel !== 'LOW'} />
 
       {showGazeCursor && gazePoint && (
         <div
@@ -705,7 +974,11 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
             height: 7,
             borderRadius: '50%',
             background:
-              aidLevel === 'HIGH' ? '#1D5FA5' : aidLevel === 'MEDIUM' ? '#BA7517' : '#8A8880',
+              effectiveAidLevel === 'HIGH'
+                ? '#1D5FA5'
+                : effectiveAidLevel === 'MEDIUM'
+                  ? '#BA7517'
+                  : '#8A8880',
             display: 'inline-block',
           }}
         />
@@ -809,12 +1082,31 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
             <div style={{ background: '#FFF7EA', borderRadius: 6, padding: '0.35rem 0.45rem' }}>
               Final: <strong>{formatScore(detectorDebug?.adjustedScore ?? detectorDebug?.selectedScore)}</strong>
             </div>
+            <div style={{ background: '#EAF4FF', borderRadius: 6, padding: '0.35rem 0.45rem' }}>
+              Rule: <strong>{formatScore(ruleDebugState.score)}</strong>
+            </div>
+            <div style={{ background: '#EAF4FF', borderRadius: 6, padding: '0.35rem 0.45rem' }}>
+              Combined: <strong>{formatScore(combinedStruggleScore)}</strong>
+            </div>
           </div>
           <div style={{ marginTop: 6, fontSize: '0.72rem', color: '#6E6653' }}>
             Type: <strong>{detectorDebug?.dominantType ?? '--'}</strong> · Trigger:
             <strong style={{ color: detectorDebug?.triggered ? '#0F6E56' : '#8A8880', marginLeft: 3 }}>
               {detectorDebug?.triggered ? 'ON' : 'OFF'}
             </strong>
+          </div>
+          <div style={{ marginTop: 6, fontSize: '0.72rem', color: '#6E6653' }}>
+            Rule band: <strong>{ruleDebugState.band.toUpperCase()}</strong> ·
+            Combined band: <strong>{combinedStruggleBand.toUpperCase()}</strong>
+          </div>
+          <div style={{ marginTop: 4, fontSize: '0.72rem', color: '#6E6653' }}>
+            Fixation: <strong>{Math.round(ruleDebugState.fixationDurationMs)}ms</strong> /
+            <strong>{Math.round(ruleDebugState.triggerFixationMs)}ms</strong> ·
+            Regressions: <strong>{ruleDebugState.regressionCount}</strong>
+          </div>
+          <div style={{ marginTop: 4, fontSize: '0.72rem', color: '#6E6653' }}>
+            Noise rejected: <strong>{ruleDebugState.velocityRejected ? 'YES' : 'NO'}</strong> ·
+            Outside text: <strong>{ruleDebugState.outsideTextZone ? 'YES' : 'NO'}</strong>
           </div>
           <div style={{ marginTop: 6, fontSize: '0.72rem', color: '#6E6653' }}>
             Th: <strong>{formatScore(detectorDebug?.triggerThreshold)}</strong> /
@@ -824,7 +1116,8 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
           </div>
           <div style={{ marginTop: 4, fontSize: '0.72rem', color: '#6E6653' }}>
             Stability: <strong>{formatScore(detectorDebug?.gazeStability)}</strong> ·
-            Zoom: <strong>{liveZoom.toFixed(3)}x</strong>
+            Article zoom: <strong>{liveZoom.toFixed(3)}x</strong> ·
+            Paragraph zoom: <strong>{paragraphFocusScale.toFixed(3)}x</strong>
           </div>
         </div>
       </div>
@@ -866,7 +1159,17 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
           </h1>
 
           {paragraphs.map((para, i) => (
-            <div key={i} onClick={() => setActivePara(i)} style={{ cursor: 'pointer' }}>
+            <div
+              key={i}
+              onClick={() => setActivePara(i)}
+              data-paragraph-index={i}
+              style={{
+                cursor: 'pointer',
+                transform: `scale(${(i === activePara ? paragraphFocusScale : 1).toFixed(4)})`,
+                transformOrigin: isRTL ? 'right top' : 'left top',
+                transition: 'transform 190ms ease',
+              }}
+            >
               {i === activePara && (
                 <div style={{
                   display: 'flex', alignItems: 'center', gap: 6,
