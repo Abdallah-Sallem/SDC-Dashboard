@@ -23,7 +23,7 @@ const RELATIVE_TO_NORM_X = 0.043;
 const RELATIVE_TO_NORM_Y = 0.052;
 const HORIZONTAL_DIRECTION = -1;
 const BASELINE_BOOTSTRAP_ALPHA = 0.18;
-const BASELINE_ADAPT_ALPHA = 0.02;
+const BASELINE_ADAPT_ALPHA = 0.006;
 const BASELINE_LOCK_RADIUS_PX = 7;
 
 /**
@@ -306,7 +306,9 @@ export class NoseAnchorTrackerAdapter {
     const deltaX = relative.x - baseline.x;
     const deltaY = relative.y - baseline.y;
 
-    const normalizedX = clamp(0.5 + HORIZONTAL_DIRECTION * deltaX * RELATIVE_TO_NORM_X, 0, 1);
+    // Symmetric center mapping around 0.5 ensures equal response left/right.
+    const mirroredDeltaX = HORIZONTAL_DIRECTION * deltaX;
+    const normalizedX = clamp(0.5 + mirroredDeltaX * RELATIVE_TO_NORM_X, 0, 1);
     const normalizedY = clamp(0.5 + deltaY * RELATIVE_TO_NORM_Y, 0, 1);
 
     const screenX = normalizedX * window.innerWidth;

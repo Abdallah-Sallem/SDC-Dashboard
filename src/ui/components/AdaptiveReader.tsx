@@ -83,10 +83,10 @@ interface CursorPoint {
 }
 
 const CURSOR_MIN_CONFIDENCE = 0.50;
-const CURSOR_DEADZONE_PX = 3;
-const CURSOR_MAX_STEP_PX = 62;
-const CURSOR_EMA_ALPHA = 0.22;
-const CURSOR_SETTLE_ALPHA = 0.18;
+const CURSOR_DEADZONE_PX = 1;
+const CURSOR_MAX_STEP_PX = 140;
+const CURSOR_EMA_ALPHA = 0.46;
+const CURSOR_SETTLE_ALPHA = 0.34;
 
 const OUT_OF_TEXT_ZONE_TRIGGER_MS = 420;
 const PARAGRAPH_FOCUS_MIN_SCALE = 1;
@@ -160,6 +160,15 @@ function computeReaderOverride(
 
 function stabilizeCursor(prev: CursorPoint | null, incoming: CursorPoint): CursorPoint {
   if (!prev) return incoming;
+
+  // High-confidence direct-follow mode for visually symmetric movement.
+  if (incoming.confidence >= 0.82) {
+    return {
+      x: prev.x + (incoming.x - prev.x) * 0.78,
+      y: prev.y + (incoming.y - prev.y) * 0.78,
+      confidence: clamp(prev.confidence * 0.32 + incoming.confidence * 0.68, 0, 1),
+    };
+  }
 
   const dx = incoming.x - prev.x;
   const dy = incoming.y - prev.y;
