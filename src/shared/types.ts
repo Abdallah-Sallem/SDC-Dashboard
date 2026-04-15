@@ -40,6 +40,9 @@ export interface GazePointData {
   y: number;
   timestamp: number;
   confidence: number;
+  normalizedX?: number;
+  normalizedY?: number;
+  velocity?: number;
   blinkRate?: number;
   headStability?: number;
   trackingLossRate?: number;
@@ -56,9 +59,14 @@ export interface TrackingLostPayload {
 export interface GazeMetrics {
   saccadeSpeed:     number;
   fixationDuration: number;
+  fixationDurationVariance?: number;
   regressionCount:  number;
+  regressionFrequency?: number;
   blinkRate:        number;
   lineSkipRate:     number;
+  microSaccadeIntensity?: number;
+  gazeDispersion?: number;
+  gazeStability?: number;
   fixationInstability: number;
   headStability: number;
   trackingLossRate: number;
@@ -88,6 +96,17 @@ export interface DetectorDebugPayload {
   confidence: number;
   dominantType: DifficultyType;
   triggered: boolean;
+  triggerThreshold?: number;
+  releaseThreshold?: number;
+  baselineMean?: number;
+  baselineStd?: number;
+  calibrationReady?: boolean;
+  activationDebounce?: number;
+  releaseDebounce?: number;
+  fixationVariance?: number;
+  microSaccadeIntensity?: number;
+  gazeDispersion?: number;
+  gazeStability?: number;
   currentLevel?: AdaptiveDifficultyLevel;
   nextLevel?: AdaptiveDifficultyLevel;
   timestamp: number;

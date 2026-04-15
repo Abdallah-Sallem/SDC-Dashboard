@@ -8,11 +8,35 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { EyeTracker }        from '../../core/eye-tracking/EyeTracker';
+import { NoseAnchorTrackerAdapter } from '../../core/eye-tracking/NoseAnchorTrackerAdapter';
 import { AdaptiveLoopController } from '../../core/ai-engine/AdaptiveLoopController';
 import { EventBus }          from '../../core/event-bus/EventBus';
 import { ConsentManager }    from '../../security/ConsentManager';
 import { logger }            from '../../shared/logger';
 import type { StudentProfile, TrackingLostPayload, TrackingLostReason } from '../../shared/types';
+
+const TRACKER_MODE_STORAGE_KEY = 'qs_tracker_mode';
+
+type TrackerMode = 'nose-anchor' | 'legacy';
+
+interface TrackerController {
+  start(options?: { userInitiated?: boolean }): Promise<boolean>;
+  stop(): void;
+  pause(): void;
+  resume(): void;
+  recalibrate(): boolean;
+  getLastError(): string | null;
+}
+
+function getPreferredTrackerMode(): TrackerMode {
+  try {
+    const stored = localStorage.getItem(TRACKER_MODE_STORAGE_KEY);
+    return stored === 'legacy' ? 'legacy' : 'nose-anchor';
+  } catch {
+    return 'nose-anchor';
+  }
+}
+
 interface EyeTrackingState {
   isActive:      boolean;
   isLoading:     boolean;
@@ -25,7 +49,7 @@ interface EyeTrackingState {
 
 export function useEyeTracking(studentId: string, sessionId: string, profile?: StudentProfile) {
 
-  const trackerRef  = useRef<EyeTracker | null>(null);
+  const trackerRef  = useRef<TrackerController | null>(null);
   const loopRef     = useRef<AdaptiveLoopController | null>(null);
   const consentMgr  = useRef(new ConsentManager());
 
@@ -69,38 +93,48 @@ export function useEyeTracking(studentId: string, sessionId: string, profile?: S
   /** Démarre le tracking */
   const start = useCallback(async () => {
 
-    // ✅ Vérification consentement — log mais ne bloque pas complètement
+    // Vérifie le consentement, mais laisse la permission navigateur décider
+    // pour une session en cours afin d'éviter un blocage silencieux.
     const hasConsent = consentMgr.current.canUseEyeTracking(studentId);
-    if (!hasConsent) {
-      logger.warn('useEyeTracking', 'Démarrage refusé — pas de consentement');
-      setState(s => ({
-        ...s,
-        noConsent:     true,
-        hasPermission: false,
-        error:         null,
-        trackingLost: false,
-        trackingLostReason: null,
-      }));
-      return;
+    const consentMissing = !hasConsent;
+    if (consentMissing) {
+      logger.warn('useEyeTracking', 'Consentement absent — tentative caméra sessionnelle');
     }
 
     setState(s => ({
       ...s,
       isLoading: true,
       error: null,
-      noConsent: false,
+      noConsent: consentMissing,
       trackingLost: false,
       trackingLostReason: null,
     }));
 
-    const tracker = new EyeTracker(sessionId);
+    const preferredMode = getPreferredTrackerMode();
+    let tracker: TrackerController =
+      preferredMode === 'legacy'
+        ? new EyeTracker(sessionId)
+        : new NoseAnchorTrackerAdapter(sessionId);
+
     const loop = new AdaptiveLoopController(sessionId, {
       baseLanguage: profile?.language ?? 'fr',
     });
 
     loop.start();
 
-    const started = await tracker.start({ userInitiated: true });
+    let started = await tracker.start({ userInitiated: true });
+
+    // Safety net: if the new tracker fails in this environment,
+    // transparently fall back to the original EyeTracker.
+    if (!started && preferredMode === 'nose-anchor') {
+      logger.warn('useEyeTracking', 'Fallback vers tracker legacy', {
+        sessionId,
+        error: tracker.getLastError(),
+      });
+
+      tracker = new EyeTracker(sessionId);
+      started = await tracker.start({ userInitiated: true });
+    }
 
     if (!started) {
       loop.stop();
@@ -108,6 +142,7 @@ export function useEyeTracking(studentId: string, sessionId: string, profile?: S
         ...s,
         isLoading:     false,
         hasPermission: false,
+        noConsent:     consentMissing,
         error:         tracker.getLastError() ?? 'Caméra non disponible — mode dégradé activé',
       }));
       return;
@@ -121,11 +156,14 @@ export function useEyeTracking(studentId: string, sessionId: string, profile?: S
       isLoading:     false,
       hasPermission: true,
       error:         null,
-      noConsent:     false,
+      noConsent:     consentMissing,
       trackingLost: false,
       trackingLostReason: null,
     });
-    logger.info('useEyeTracking', 'Eye-tracking démarré', { sessionId });
+    logger.info('useEyeTracking', 'Eye-tracking demarre', {
+      sessionId,
+      trackerMode: tracker instanceof NoseAnchorTrackerAdapter ? 'nose-anchor' : 'legacy',
+    });
 
   }, [studentId, sessionId, profile?.language]);
 

@@ -38,6 +38,11 @@ const FIXATION_RADIUS_PX = 22;
 const REGRESSION_DELTA_PX = 18;
 const LINE_SKIP_DELTA_PX = 40;
 const HEAD_MOTION_NORMALIZER = 0.025;
+const HEAD_COMPENSATION_X = 0.20;
+const HEAD_COMPENSATION_Y = 0.24;
+const EYE_GAIN_X = 1.14;
+const EYE_GAIN_Y = 1.08;
+const FAST_MOTION_THRESHOLD_PX = 22;
 
 const LEFT_EAR_POINTS = [33, 159, 158, 133, 153, 145] as const;
 const RIGHT_EAR_POINTS = [362, 386, 385, 263, 373, 374] as const;
@@ -73,6 +78,8 @@ export class EyeTracker {
   private headStabilityWindow: number[] = [];
   private eyeClosedAt: number | null = null;
   private previousNose: NormalizedLandmark | null = null;
+  private baselineNose: NormalizedLandmark | null = null;
+  private baselineNoseSamples = 0;
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -329,7 +336,8 @@ export class EyeTracker {
 
     const blinkRate = this.updateBlinkRate(landmarks, now);
     const headStability = this.updateHeadStability(landmarks);
-    const rawPoint = this.estimateGazePoint(landmarks, now);
+    this.updateHeadBaseline(landmarks, headStability);
+    const rawPoint = this.estimateGazePoint(landmarks, now, headStability);
 
     if (!rawPoint || rawPoint.confidence < EYE_TRACKING_MIN_CONFIDENCE) {
       this.invalidFrameStreak++;
@@ -418,26 +426,54 @@ export class EyeTracker {
       this.smoothingBuffer.shift();
     }
 
-    const sums = this.smoothingBuffer.reduce(
-      (acc, p) => {
-        acc.x += p.x;
-        acc.y += p.y;
-        acc.confidence += p.confidence;
-        return acc;
-      },
-      { x: 0, y: 0, confidence: 0 }
-    );
-
     const len = this.smoothingBuffer.length;
+    const latest = this.smoothingBuffer[len - 1];
+    const prev = len > 1 ? this.smoothingBuffer[len - 2] : latest;
+    const motion = Math.hypot(latest.x - prev.x, latest.y - prev.y);
+
+    const dynamicWindow =
+      motion >= FAST_MOTION_THRESHOLD_PX
+        ? Math.max(3, Math.floor(EYE_TRACKING_SMOOTHING_WINDOW / 2))
+        : EYE_TRACKING_SMOOTHING_WINDOW;
+
+    const points = this.smoothingBuffer.slice(-dynamicWindow);
+
+    let weightedX = 0;
+    let weightedY = 0;
+    let weightedConfidence = 0;
+    let totalWeight = 0;
+
+    // Poids croissants vers les points récents pour réduire le lag.
+    for (let i = 0; i < points.length; i++) {
+      const weight = i + 1;
+      totalWeight += weight;
+      weightedX += points[i].x * weight;
+      weightedY += points[i].y * weight;
+      weightedConfidence += points[i].confidence * weight;
+    }
+
+    const averagedX = weightedX / Math.max(1, totalWeight);
+    const averagedY = weightedY / Math.max(1, totalWeight);
+    const settleFactor = motion < FAST_MOTION_THRESHOLD_PX * 0.45 ? 0.34 : 0.14;
+
+    // À l'arrêt, on rapproche légèrement le point lissé du dernier point mesuré
+    // pour éviter une position finale décalée après un mouvement.
+    const settledX = averagedX + (latest.x - averagedX) * settleFactor;
+    const settledY = averagedY + (latest.y - averagedY) * settleFactor;
+
     return {
-      x: sums.x / len,
-      y: sums.y / len,
-      confidence: sums.confidence / len,
+      x: settledX,
+      y: settledY,
+      confidence: weightedConfidence / Math.max(1, totalWeight),
       timestamp: point.timestamp,
     };
   }
 
-  private estimateGazePoint(landmarks: NormalizedLandmark[], timestamp: number): GazePointData | null {
+  private estimateGazePoint(
+    landmarks: NormalizedLandmark[],
+    timestamp: number,
+    headStability: number
+  ): GazePointData | null {
     const leftIris = this.averagePoint(landmarks, LEFT_IRIS_POINTS) ?? this.averagePoint(landmarks, [33, 133]);
     const rightIris = this.averagePoint(landmarks, RIGHT_IRIS_POINTS) ?? this.averagePoint(landmarks, [362, 263]);
 
@@ -446,14 +482,61 @@ export class EyeTracker {
     const xNorm = (leftIris.x + rightIris.x) / 2;
     const yNorm = (leftIris.y + rightIris.y) / 2;
 
-    const confidence = clamp(1 - Math.abs(leftIris.y - rightIris.y) * 3, 0, 1);
+    const nose = landmarks[1];
+    let compensatedX = xNorm;
+    let compensatedY = yNorm;
+
+    if (nose && this.baselineNose) {
+      compensatedX = clamp(
+        compensatedX - (nose.x - this.baselineNose.x) * HEAD_COMPENSATION_X,
+        0,
+        1
+      );
+      compensatedY = clamp(
+        compensatedY - (nose.y - this.baselineNose.y) * HEAD_COMPENSATION_Y,
+        0,
+        1
+      );
+    }
+
+    // Gain léger autour du centre pour mieux couvrir les mouvements de l'oeil.
+    compensatedX = clamp((compensatedX - 0.5) * EYE_GAIN_X + 0.5, 0, 1);
+    compensatedY = clamp((compensatedY - 0.5) * EYE_GAIN_Y + 0.5, 0, 1);
+
+    const baseConfidence = clamp(1 - Math.abs(leftIris.y - rightIris.y) * 3, 0, 1);
+    const confidence = clamp(baseConfidence * 0.78 + headStability * 0.22, 0, 1);
 
     return {
-      x: clamp(xNorm, 0, 1) * window.innerWidth,
-      y: clamp(yNorm, 0, 1) * window.innerHeight,
+      x: compensatedX * window.innerWidth,
+      y: compensatedY * window.innerHeight,
       timestamp,
       confidence,
     };
+  }
+
+  private updateHeadBaseline(landmarks: NormalizedLandmark[], headStability: number): void {
+    const nose = landmarks[1];
+    if (!nose) return;
+
+    if (!this.baselineNose) {
+      this.baselineNose = {
+        x: nose.x,
+        y: nose.y,
+        z: nose.z,
+      };
+      this.baselineNoseSamples = 1;
+      return;
+    }
+
+    if (headStability < 0.48) {
+      return;
+    }
+
+    const alpha = this.baselineNoseSamples < 40 ? 0.08 : 0.02;
+    this.baselineNose.x += (nose.x - this.baselineNose.x) * alpha;
+    this.baselineNose.y += (nose.y - this.baselineNose.y) * alpha;
+    this.baselineNose.z += (nose.z - this.baselineNose.z) * alpha;
+    this.baselineNoseSamples = Math.min(this.baselineNoseSamples + 1, 1500);
   }
 
   private updateBlinkRate(landmarks: NormalizedLandmark[], now: number): number {
@@ -627,6 +710,8 @@ export class EyeTracker {
     this.headStabilityWindow = [];
     this.eyeClosedAt = null;
     this.previousNose = null;
+    this.baselineNose = null;
+    this.baselineNoseSamples = 0;
 
     this.lastSampledAt = 0;
     this.lastValidPointAt = Date.now();

@@ -52,6 +52,82 @@ function formatScore(score: number | undefined): string {
   return score.toFixed(3);
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+const ZOOM_MIN_SCALE = 1;
+const ZOOM_MAX_SCALE = 1.16;
+const ZOOM_LERP_ALPHA = 0.15;
+const ZOOM_ORIGIN_LERP = 0.20;
+const ZOOM_TARGET_COOLDOWN_MS = 500;
+const ZOOM_STABILITY_MIN = 0.55;
+
+function scoreToZoom(score: number, triggerThreshold: number): number {
+  const effectiveThreshold = clamp(triggerThreshold, 0.2, 0.9);
+  const normalized = clamp((score - effectiveThreshold) / Math.max(0.08, 1 - effectiveThreshold), 0, 1);
+  return ZOOM_MIN_SCALE + normalized * (ZOOM_MAX_SCALE - ZOOM_MIN_SCALE);
+}
+
+interface CursorPoint {
+  x: number;
+  y: number;
+  confidence: number;
+}
+
+const CURSOR_MIN_CONFIDENCE = 0.50;
+const CURSOR_DEADZONE_PX = 3;
+const CURSOR_MAX_STEP_PX = 62;
+const CURSOR_EMA_ALPHA = 0.22;
+const CURSOR_SETTLE_ALPHA = 0.18;
+
+function stabilizeCursor(prev: CursorPoint | null, incoming: CursorPoint): CursorPoint {
+  if (!prev) return incoming;
+
+  const dx = incoming.x - prev.x;
+  const dy = incoming.y - prev.y;
+  const distance = Math.hypot(dx, dy);
+
+  // Deadzone anti-jitter: ignore micro-mouvements parasites.
+  if (distance <= CURSOR_DEADZONE_PX) {
+    // Même dans la deadzone, on garde un léger "pull" vers la position réelle
+    // pour éviter de rester bloqué quelques pixels à côté de la cible.
+    const settleAlpha = clamp(
+      CURSOR_SETTLE_ALPHA + (incoming.confidence - CURSOR_MIN_CONFIDENCE) * 0.08,
+      CURSOR_SETTLE_ALPHA,
+      0.28
+    );
+
+    return {
+      x: prev.x + (incoming.x - prev.x) * settleAlpha,
+      y: prev.y + (incoming.y - prev.y) * settleAlpha,
+      confidence: clamp(prev.confidence * 0.72 + incoming.confidence * 0.28, 0, 1),
+    };
+  }
+
+  let targetX = incoming.x;
+  let targetY = incoming.y;
+
+  // Capping évite les sauts brusques de curseur entre deux frames.
+  if (distance > CURSOR_MAX_STEP_PX) {
+    const ratio = CURSOR_MAX_STEP_PX / distance;
+    targetX = prev.x + dx * ratio;
+    targetY = prev.y + dy * ratio;
+  }
+
+  const adaptiveAlpha = clamp(
+    CURSOR_EMA_ALPHA + (incoming.confidence - CURSOR_MIN_CONFIDENCE) * 0.12,
+    CURSOR_EMA_ALPHA,
+    0.38
+  );
+
+  return {
+    x: prev.x + (targetX - prev.x) * adaptiveAlpha,
+    y: prev.y + (targetY - prev.y) * adaptiveAlpha,
+    confidence: clamp(prev.confidence * 0.65 + incoming.confidence * 0.35, 0, 1),
+  };
+}
+
 type ReaderAidLevel = 'LOW' | 'MEDIUM' | 'HIGH';
 
 function inferAidLevel(params: AdaptationParams | null): ReaderAidLevel {
@@ -267,13 +343,28 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
 }) => {
   const containerRef = useRef<HTMLElement>(null);
   const startTimeRef = useRef<number>(0);
+  const zoomStateRef = useRef<{
+    currentScale: number;
+    targetScale: number;
+    originX: number;
+    originY: number;
+    lastTargetUpdateAt: number;
+    rafId: number | null;
+  }>({
+    currentScale: 1,
+    targetScale: 1,
+    originX: 50,
+    originY: 50,
+    lastTargetUpdateAt: 0,
+    rafId: null,
+  });
 
   const [started,    setStarted]    = useState(false);
   const [ended,      setEnded]      = useState(false);
   const [endReason,  setEndReason]  = useState<'completed' | 'timeout'>('completed');
   const [activePara, setActivePara] = useState(0);
   const [elapsed,    setElapsed]    = useState(0);
-  const [gazePoint,  setGazePoint]  = useState<{ x: number; y: number; confidence: number } | null>(null);
+  const [gazePoint,  setGazePoint]  = useState<CursorPoint | null>(null);
   const [detectorMode, setDetectorMode] = useState<DetectorMode>(() => {
     try {
       const stored = localStorage.getItem(DETECTOR_MODE_STORAGE_KEY);
@@ -292,7 +383,7 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
     profile.neurodivergenceTypes.includes('unknown');
 
   const { currentParams, isActive: adapterActive } = useTextAdapter(profile, sessionId);
-  const { start: startTracking, hasPermission, noConsent } = useEyeTracking(
+  const { start: startTracking, hasPermission, noConsent, recalibrate } = useEyeTracking(
     profile.id, sessionId, profile);
   const { direction, isRTL, updateForText } = useBilingual(text.content);
 
@@ -385,11 +476,25 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
     const unsub = EventBus.on<GazePointData>('gaze:point', (event) => {
       if (event.sessionId !== sessionId) return;
 
-      setGazePoint({
+      const incoming: CursorPoint = {
         x: event.payload.x,
         y: event.payload.y,
         confidence: event.payload.confidence,
-      });
+      };
+
+      if (incoming.confidence < CURSOR_MIN_CONFIDENCE) {
+        setGazePoint((prev) =>
+          prev
+            ? {
+                ...prev,
+                confidence: clamp(prev.confidence * 0.90, 0, 1),
+              }
+            : null
+        );
+        return;
+      }
+
+      setGazePoint((prev) => stabilizeCursor(prev, incoming));
     });
 
     return () => {
@@ -412,6 +517,98 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
     };
   }, [started, ended, sessionId]);
 
+  // Met à jour la cible de zoom uniquement si le signal est stable.
+  useEffect(() => {
+    if (!started || ended) return;
+
+    const zoomState = zoomStateRef.current;
+    const score = detectorDebug?.adjustedScore ?? detectorDebug?.selectedScore ?? 0;
+    const triggerThreshold = detectorDebug?.triggerThreshold ?? 0.42;
+    const gazeStability = detectorDebug?.gazeStability ?? 1;
+    const confidenceOk = (gazePoint?.confidence ?? 1) >= 0.55;
+
+    const shouldZoom = Boolean(detectorDebug?.triggered) && gazeStability >= ZOOM_STABILITY_MIN && confidenceOk;
+    const targetScale = shouldZoom
+      ? scoreToZoom(score, triggerThreshold)
+      : ZOOM_MIN_SCALE;
+
+    const now = Date.now();
+    const targetChanged = Math.abs(targetScale - zoomState.targetScale) > 0.01;
+    const canUpdateTarget =
+      now - zoomState.lastTargetUpdateAt >= ZOOM_TARGET_COOLDOWN_MS ||
+      targetScale < zoomState.targetScale;
+
+    if (targetChanged && canUpdateTarget) {
+      zoomState.targetScale = targetScale;
+      zoomState.lastTargetUpdateAt = now;
+    }
+
+    if (gazePoint && containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      if (rect.width > 1 && rect.height > 1) {
+        const relativeX = ((gazePoint.x - rect.left) / rect.width) * 100;
+        const relativeY = ((gazePoint.y - rect.top) / rect.height) * 100;
+        const boundedX = clamp(relativeX, 14, 86);
+        const boundedY = clamp(relativeY, 18, 82);
+
+        zoomState.originX += (boundedX - zoomState.originX) * ZOOM_ORIGIN_LERP;
+        zoomState.originY += (boundedY - zoomState.originY) * ZOOM_ORIGIN_LERP;
+      }
+    }
+  }, [detectorDebug, ended, gazePoint, started]);
+
+  // Animation continue via requestAnimationFrame pour un zoom fluide sans saccades.
+  useEffect(() => {
+    if (!started || ended) return;
+
+    let isMounted = true;
+
+    const tick = () => {
+      if (!isMounted) return;
+
+      const article = containerRef.current;
+      const zoomState = zoomStateRef.current;
+
+      zoomState.currentScale +=
+        (zoomState.targetScale - zoomState.currentScale) * ZOOM_LERP_ALPHA;
+
+      if (Math.abs(zoomState.targetScale - zoomState.currentScale) < 0.0008) {
+        zoomState.currentScale = zoomState.targetScale;
+      }
+
+      if (article) {
+        article.style.transformOrigin = `${zoomState.originX.toFixed(1)}% ${zoomState.originY.toFixed(1)}%`;
+        article.style.transform = `scale(${zoomState.currentScale.toFixed(4)})`;
+        article.style.willChange = 'transform';
+      }
+
+      zoomState.rafId = requestAnimationFrame(tick);
+    };
+
+    zoomStateRef.current.rafId = requestAnimationFrame(tick);
+
+    return () => {
+      isMounted = false;
+
+      if (zoomStateRef.current.rafId !== null) {
+        cancelAnimationFrame(zoomStateRef.current.rafId);
+        zoomStateRef.current.rafId = null;
+      }
+
+      const article = containerRef.current;
+      if (article) {
+        article.style.transform = 'scale(1)';
+        article.style.transformOrigin = '50% 50%';
+        article.style.willChange = 'auto';
+      }
+
+      zoomStateRef.current.currentScale = 1;
+      zoomStateRef.current.targetScale = 1;
+      zoomStateRef.current.originX = 50;
+      zoomStateRef.current.originY = 50;
+    };
+  }, [ended, started]);
+
   const readerStyle: React.CSSProperties = {
     fontFamily:      'var(--qs-font-family)',
     fontSize:        'var(--qs-font-size)',
@@ -431,6 +628,8 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
       'color var(--qs-transition-duration, 500ms) ease',
     borderRadius:    12,
     padding:         '1.5rem',
+    transform:       'scale(1)',
+    transformOrigin: '50% 50%',
   };
 
   if (!started) return (
@@ -455,6 +654,7 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
   const timeLeft    = Math.max(0, maxDuration - elapsed);
   const timeWarning = timeLeft < 2 * 60 * 1000;
   const showGazeCursor = hasPermission === true && gazePoint !== null;
+  const liveZoom = zoomStateRef.current.currentScale;
 
   return (
     <div style={{ position: 'relative' }}>
@@ -475,7 +675,7 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
             background: 'rgba(29, 158, 117, 0.10)',
             pointerEvents: 'none',
             zIndex: 9999,
-            transition: 'left 80ms linear, top 80ms linear, border-color 120ms ease',
+            transition: 'left 90ms ease-out, top 90ms ease-out, border-color 120ms ease',
             boxShadow: '0 0 0 6px rgba(29, 158, 117, 0.08)',
           }}
         />
@@ -561,6 +761,24 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
               Hybrid model
             </button>
           </div>
+          <button
+            onClick={() => recalibrate()}
+            style={{
+              width: '100%',
+              marginTop: 8,
+              border: '1px solid #C9D9E7',
+              background: '#FFFFFF',
+              color: '#25557B',
+              borderRadius: 8,
+              padding: '0.35rem 0.4rem',
+              fontSize: '0.74rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+            title="Recalibrer le suivi du regard"
+          >
+            Recalibrer le regard
+          </button>
         </div>
 
         <div style={{
@@ -598,6 +816,16 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
               {detectorDebug?.triggered ? 'ON' : 'OFF'}
             </strong>
           </div>
+          <div style={{ marginTop: 6, fontSize: '0.72rem', color: '#6E6653' }}>
+            Th: <strong>{formatScore(detectorDebug?.triggerThreshold)}</strong> /
+            <strong>{formatScore(detectorDebug?.releaseThreshold)}</strong> ·
+            Base: <strong>{formatScore(detectorDebug?.baselineMean)}</strong> ±
+            <strong>{formatScore(detectorDebug?.baselineStd)}</strong>
+          </div>
+          <div style={{ marginTop: 4, fontSize: '0.72rem', color: '#6E6653' }}>
+            Stability: <strong>{formatScore(detectorDebug?.gazeStability)}</strong> ·
+            Zoom: <strong>{liveZoom.toFixed(3)}x</strong>
+          </div>
         </div>
       </div>
 
@@ -624,42 +852,44 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
       )}
 
       {/* Zone lecture */}
-      <article
-        ref={containerRef}
-        className="qs-reader"
-        style={readerStyle}
-        lang={isRTL ? 'ar' : 'fr'}
-        dir={direction}
-        tabIndex={0}
-      >
-        <h1 style={{ marginBottom: '1.5em', fontSize: '1.4em', fontWeight: 600 }}>
-          {text.title}
-        </h1>
+      <div style={{ borderRadius: 14, overflow: 'hidden' }}>
+        <article
+          ref={containerRef}
+          className="qs-reader"
+          style={readerStyle}
+          lang={isRTL ? 'ar' : 'fr'}
+          dir={direction}
+          tabIndex={0}
+        >
+          <h1 style={{ marginBottom: '1.5em', fontSize: '1.4em', fontWeight: 600 }}>
+            {text.title}
+          </h1>
 
-        {paragraphs.map((para, i) => (
-          <div key={i} onClick={() => setActivePara(i)} style={{ cursor: 'pointer' }}>
-            {i === activePara && (
-              <div style={{
-                display: 'flex', alignItems: 'center', gap: 6,
-                marginBottom: 2, color: '#1D9E75',
-                fontSize: '0.78rem', fontWeight: 500,
-              }}>
-                <span>▶ Tu lis ici</span>
-                <span style={{ fontSize: '0.7rem', color: '#B4B2A9', fontWeight: 400 }}>
-                  {i + 1} / {paragraphs.length}
-                </span>
-              </div>
-            )}
-            <ReadingParagraph
-              text={para}
-              isDyslexic={isDyslexic}
-              isRTL={isRTL}
-              isActive={i === activePara}
-              paragraphIndex={i}
-            />
-          </div>
-        ))}
-      </article>
+          {paragraphs.map((para, i) => (
+            <div key={i} onClick={() => setActivePara(i)} style={{ cursor: 'pointer' }}>
+              {i === activePara && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  marginBottom: 2, color: '#1D9E75',
+                  fontSize: '0.78rem', fontWeight: 500,
+                }}>
+                  <span>▶ Tu lis ici</span>
+                  <span style={{ fontSize: '0.7rem', color: '#B4B2A9', fontWeight: 400 }}>
+                    {i + 1} / {paragraphs.length}
+                  </span>
+                </div>
+              )}
+              <ReadingParagraph
+                text={para}
+                isDyslexic={isDyslexic}
+                isRTL={isRTL}
+                isActive={i === activePara}
+                paragraphIndex={i}
+              />
+            </div>
+          ))}
+        </article>
+      </div>
 
       {/* Navigation */}
       <div style={{

@@ -1,18 +1,13 @@
 /**
  * DifficultyDetector.ts
- * Hybrid detector for V0:
- * - Heuristic behavioral score (stable in real-time)
- * - ETDD70-trained logistic probability (data-driven signal)
+ * Hybrid detector real-time:
+ * - Heuristique robuste sur fenêtre glissante (1-2s)
+ * - Probabilité issue du modèle ETDD70
  *
- * It combines:
- * - fixation instability (jitter)
- * - long fixation
- * - regressions
- * - blink deviation
- * - head/tracking instability
+ * Le détecteur fournit un score continu. La logique de déclenchement
+ * (baseline, hysteresis, debounce) est gérée dans AdaptiveLoopController.
  */
 
-import { DIFFICULTY_THRESHOLD_LIGHT } from '../../shared/constants';
 import type {
   DetectorDebugPayload,
   DetectorMode,
@@ -25,9 +20,10 @@ import { Etdd70LogregModel } from './Etdd70LogregModel';
 
 interface HeuristicBreakdown {
   score: number;
-  instabilityScore: number;
-  longFixationScore: number;
+  fixationVarianceScore: number;
+  microSaccadeScore: number;
   regressionScore: number;
+  dispersionScore: number;
   blinkScore: number;
   trackingScore: number;
 }
@@ -45,6 +41,10 @@ export class DifficultyDetector {
     confidence: 0,
     dominantType: 'attention',
     triggered: false,
+    fixationVariance: 0,
+    microSaccadeIntensity: 0,
+    gazeDispersion: 0,
+    gazeStability: 1,
     timestamp: Date.now(),
   };
 
@@ -65,7 +65,7 @@ export class DifficultyDetector {
     return { ...this.lastDebug };
   }
 
-  infer(metrics: GazeMetrics): DifficultySignal | null {
+  infer(metrics: GazeMetrics): DifficultySignal {
     const heuristic = this.computeHeuristic(metrics);
 
     let modelProbability = 0;
@@ -87,24 +87,27 @@ export class DifficultyDetector {
     const selectedScore = this.mode === 'hybrid' ? hybridScore : heuristic.score;
 
     const dominantType = this.classifyType({
-      instabilityScore: heuristic.instabilityScore,
-      longFixationScore: heuristic.longFixationScore,
+      fixationVarianceScore: heuristic.fixationVarianceScore,
+      microSaccadeScore: heuristic.microSaccadeScore,
       regressionScore: heuristic.regressionScore,
+      dispersionScore: heuristic.dispersionScore,
       blinkScore: heuristic.blinkScore,
       trackingScore: heuristic.trackingScore,
     });
 
-    const modelAgreement = 1 - Math.abs(modelProbability - heuristic.score);
-    const confidence = clamp(
-      0.45 +
-        modelAgreement * 0.25 +
-        selectedScore * 0.20 +
-        (1 - metrics.trackingLossRate) * 0.10,
+    const stability = clamp(
+      metrics.gazeStability ?? 1 - (metrics.gazeDispersion ?? metrics.fixationInstability) / 140,
       0,
       1
     );
+    const trackingQuality = clamp(1 - metrics.trackingLossRate, 0, 1);
+    const modelAgreement = 1 - Math.abs(modelProbability - heuristic.score);
 
-    const triggered = selectedScore >= DIFFICULTY_THRESHOLD_LIGHT;
+    const confidence = clamp(
+      0.32 + modelAgreement * 0.28 + trackingQuality * 0.24 + stability * 0.16,
+      0,
+      1
+    );
 
     this.lastDebug = {
       mode: this.mode,
@@ -114,13 +117,13 @@ export class DifficultyDetector {
       selectedScore,
       confidence,
       dominantType,
-      triggered,
+      triggered: false,
+      fixationVariance: metrics.fixationDurationVariance,
+      microSaccadeIntensity: metrics.microSaccadeIntensity,
+      gazeDispersion: metrics.gazeDispersion,
+      gazeStability: stability,
       timestamp: Date.now(),
     };
-
-    if (!triggered) {
-      return null;
-    }
 
     return {
       type: dominantType,
@@ -132,14 +135,18 @@ export class DifficultyDetector {
   }
 
   private computeHeuristic(metrics: GazeMetrics): HeuristicBreakdown {
-    const instabilityScore = clamp(metrics.fixationInstability / 42, 0, 1);
-
-    const longFixationScore =
-      metrics.fixationDuration <= 430
-        ? 0
-        : clamp((metrics.fixationDuration - 430) / 850, 0, 1);
-
-    const regressionScore = clamp(metrics.regressionCount / 4, 0, 1);
+    const fixationVarianceScore = clamp((metrics.fixationDurationVariance ?? 0) / 45_000, 0, 1);
+    const microSaccadeScore = clamp(metrics.microSaccadeIntensity ?? 0, 0, 1);
+    const regressionScore = clamp(
+      (metrics.regressionFrequency ?? metrics.regressionCount / 6) * 1.25,
+      0,
+      1
+    );
+    const dispersionScore = clamp(
+      (metrics.gazeDispersion ?? metrics.fixationInstability) / 92,
+      0,
+      1
+    );
 
     const blinkScore = this.computeBlinkDeviation(metrics.blinkRate);
 
@@ -150,20 +157,22 @@ export class DifficultyDetector {
     );
 
     const score = clamp(
-      instabilityScore * 0.28 +
-        longFixationScore * 0.30 +
+      fixationVarianceScore * 0.21 +
+        microSaccadeScore * 0.22 +
         regressionScore * 0.22 +
-        blinkScore * 0.12 +
-        trackingScore * 0.08,
+        dispersionScore * 0.20 +
+        blinkScore * 0.09 +
+        trackingScore * 0.06,
       0,
       1
     );
 
     return {
       score,
-      instabilityScore,
-      longFixationScore,
+      fixationVarianceScore,
+      microSaccadeScore,
       regressionScore,
+      dispersionScore,
       blinkScore,
       trackingScore,
     };
@@ -178,24 +187,21 @@ export class DifficultyDetector {
   }
 
   private classifyType(scores: {
-    instabilityScore: number;
-    longFixationScore: number;
+    fixationVarianceScore: number;
+    microSaccadeScore: number;
     regressionScore: number;
+    dispersionScore: number;
     blinkScore: number;
     trackingScore: number;
   }): DifficultyType {
-    if (scores.blinkScore >= 0.55) return 'fatigue';
+    if (scores.trackingScore >= 0.58) return 'line-tracking';
+    if (scores.blinkScore >= 0.56) return 'fatigue';
 
-    if (scores.trackingScore >= 0.55) return 'line-tracking';
-
-    if (
-      scores.longFixationScore + scores.regressionScore >=
-      scores.instabilityScore + 0.2
-    ) {
+    if (scores.fixationVarianceScore + scores.regressionScore >= scores.microSaccadeScore + 0.22) {
       return 'dyslexia-visual';
     }
 
-    if (scores.instabilityScore > 0.45) return 'attention';
+    if (scores.microSaccadeScore + scores.dispersionScore > 0.78) return 'attention';
 
     return 'attention';
   }
