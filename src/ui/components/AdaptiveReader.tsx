@@ -83,10 +83,10 @@ interface CursorPoint {
 }
 
 const CURSOR_MIN_CONFIDENCE = 0.50;
-const CURSOR_DEADZONE_PX = 1;
-const CURSOR_MAX_STEP_PX = 140;
-const CURSOR_EMA_ALPHA = 0.46;
-const CURSOR_SETTLE_ALPHA = 0.34;
+const CURSOR_DEADZONE_PX = 2;
+const CURSOR_MAX_STEP_PX = 100;
+const CURSOR_EMA_ALPHA = 0.15;
+const CURSOR_SETTLE_ALPHA = 0.05;
 
 const OUT_OF_TEXT_ZONE_TRIGGER_MS = 420;
 const PARAGRAPH_FOCUS_MIN_SCALE = 1;
@@ -158,17 +158,8 @@ function computeReaderOverride(
   return {};
 }
 
-function stabilizeCursor(prev: CursorPoint | null, incoming: CursorPoint): CursorPoint {
+    function stabilizeCursor(prev: CursorPoint | null, incoming: CursorPoint): CursorPoint {
   if (!prev) return incoming;
-
-  // High-confidence direct-follow mode for visually symmetric movement.
-  if (incoming.confidence >= 0.82) {
-    return {
-      x: prev.x + (incoming.x - prev.x) * 0.78,
-      y: prev.y + (incoming.y - prev.y) * 0.78,
-      confidence: clamp(prev.confidence * 0.32 + incoming.confidence * 0.68, 0, 1),
-    };
-  }
 
   const dx = incoming.x - prev.x;
   const dy = incoming.y - prev.y;
@@ -179,9 +170,9 @@ function stabilizeCursor(prev: CursorPoint | null, incoming: CursorPoint): Curso
     // Même dans la deadzone, on garde un léger "pull" vers la position réelle
     // pour éviter de rester bloqué quelques pixels à côté de la cible.
     const settleAlpha = clamp(
-      CURSOR_SETTLE_ALPHA + (incoming.confidence - CURSOR_MIN_CONFIDENCE) * 0.08,
+      CURSOR_SETTLE_ALPHA + (incoming.confidence - CURSOR_MIN_CONFIDENCE) * 0.05,
       CURSOR_SETTLE_ALPHA,
-      0.28
+      0.15
     );
 
     return {
@@ -202,9 +193,9 @@ function stabilizeCursor(prev: CursorPoint | null, incoming: CursorPoint): Curso
   }
 
   const adaptiveAlpha = clamp(
-    CURSOR_EMA_ALPHA + (incoming.confidence - CURSOR_MIN_CONFIDENCE) * 0.12,
+    CURSOR_EMA_ALPHA + (incoming.confidence - CURSOR_MIN_CONFIDENCE) * 0.08,
     CURSOR_EMA_ALPHA,
-    0.38
+    0.22
   );
 
   return {
@@ -1154,7 +1145,7 @@ export const AdaptiveReader: React.FC<AdaptiveReaderProps> = ({
       )}
 
       {/* Zone lecture */}
-      <div style={{ borderRadius: 14, overflow: 'hidden' }}>
+      <div style={{ borderRadius: 14, overflow: 'visible' }}>
         <article
           ref={containerRef}
           className="qs-reader"
