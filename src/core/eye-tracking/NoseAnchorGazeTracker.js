@@ -18,8 +18,8 @@ import { FaceMesh } from '@mediapipe/face_mesh';
 const NOSE_NASION_INDEX = 168;
 const LEFT_IRIS_INDEXES = [468, 469, 470, 471, 472];
 const RIGHT_IRIS_INDEXES = [473, 474, 475, 476, 477];
-const EYE_DOMINANCE_X = 1.22;
-const EYE_DOMINANCE_Y = 1.14;
+const EYE_DOMINANCE_X = 1.12;
+const EYE_DOMINANCE_Y = 1.08;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));

@@ -4,6 +4,8 @@ import {
   EYE_TRACKING_CAMERA_OFF_NULL_STREAK,
   EYE_TRACKING_FACE_LOST_TIMEOUT_MS,
   EYE_TRACKING_INTERVAL_MS,
+  EYE_TRACKING_INVERT_X,
+  EYE_TRACKING_INVERT_Y,
   EYE_TRACKING_MIN_CONFIDENCE,
 } from '../../shared/constants';
 import { clamp } from '../../shared/utils';
@@ -19,9 +21,8 @@ interface PermissionResult {
   error: string | null;
 }
 
-const RELATIVE_TO_NORM_X = 0.043;
-const RELATIVE_TO_NORM_Y = 0.052;
-const HORIZONTAL_DIRECTION = -1;
+const RELATIVE_TO_NORM_X = 0.032;
+const RELATIVE_TO_NORM_Y = 0.038;
 const BASELINE_BOOTSTRAP_ALPHA = 0.18;
 const BASELINE_ADAPT_ALPHA = 0.006;
 const BASELINE_LOCK_RADIUS_PX = 7;
@@ -93,14 +94,14 @@ export class NoseAnchorTrackerAdapter {
       this.videoEl = await this.createHiddenVideo(this.mediaStream);
       this.tracker = new NoseAnchorGazeTracker(this.videoEl, {
         onUpdate: (output) => this.handleUpdate(output),
-        baseAlpha: 0.18,
-        fastAlpha: 0.52,
-        velocityThresholdPx: 11,
-        maxJumpPx: 95,
-        gainX: 1.18,
-        gainY: 1.12,
-        minDetectionConfidence: 0.55,
-        minTrackingConfidence: 0.55,
+        baseAlpha: 0.08,
+        fastAlpha: 0.28,
+        velocityThresholdPx: 25,
+        maxJumpPx: 50,
+        gainX: 0.95,
+        gainY: 0.90,
+        minDetectionConfidence: 0.65,
+        minTrackingConfidence: 0.65,
         selfieMode: true,
       });
 
@@ -306,10 +307,10 @@ export class NoseAnchorTrackerAdapter {
     const deltaX = relative.x - baseline.x;
     const deltaY = relative.y - baseline.y;
 
-    // Symmetric center mapping around 0.5 ensures equal response left/right.
-    const mirroredDeltaX = HORIZONTAL_DIRECTION * deltaX;
-    const normalizedX = clamp(0.5 + mirroredDeltaX * RELATIVE_TO_NORM_X, 0, 1);
-    const normalizedY = clamp(0.5 + deltaY * RELATIVE_TO_NORM_Y, 0, 1);
+    const normalizedXBase = clamp(0.5 + deltaX * RELATIVE_TO_NORM_X, 0, 1);
+    const normalizedYBase = clamp(0.5 + deltaY * RELATIVE_TO_NORM_Y, 0, 1);
+    const normalizedX = EYE_TRACKING_INVERT_X ? 1 - normalizedXBase : normalizedXBase;
+    const normalizedY = EYE_TRACKING_INVERT_Y ? 1 - normalizedYBase : normalizedYBase;
 
     const screenX = normalizedX * window.innerWidth;
     const screenY = normalizedY * window.innerHeight;

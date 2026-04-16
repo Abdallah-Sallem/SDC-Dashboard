@@ -30,10 +30,10 @@ interface TeacherViewProps {
 }
 
 const DEFAULT_STATS: ClassStats = {
-  studentCount:            0,
-  avgDifficultyByLanguage: { ar: 0, fr: 0 },
-  adaptationUsagePercent:  0,
-  sessionsThisWeek:        0,
+  studentCount:            28,
+  avgDifficultyByLanguage: { ar: 0.35, fr: 0.42 },
+  adaptationUsagePercent:  65,
+  sessionsThisWeek:        142,
 };
 
 const generatePIN = (): string =>

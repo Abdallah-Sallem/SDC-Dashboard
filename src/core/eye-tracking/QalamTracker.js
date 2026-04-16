@@ -14,6 +14,7 @@ const DEFAULT_CONFIG = {
   fpsTarget: 30,
   smoothingFactor: 0.22,
   debug: false,
+  invertX: true,
   windowMs: 500,
   outlierDistance: 0.45,
   confidenceDecayPerSecond: 0.55,
@@ -494,8 +495,12 @@ export class QalamTracker {
     const rotatedY = -gazeVecX * sinRoll + gazeVecY * cosRoll;
 
     // Dimensionless normalization to remove face-distance scale dependency.
-    const normalizedX = rotatedX / interEyeDistance;
+    let normalizedX = rotatedX / interEyeDistance;
     const normalizedY = rotatedY / interEyeDistance;
+
+    if (this.config.invertX) {
+      normalizedX = -normalizedX;
+    }
 
     // Confidence shaping from geometric plausibility.
     const inFramePenalty = Math.max(
@@ -919,6 +924,28 @@ export class QalamTracker {
     const ctx = this.debugCtx;
     ctx.clearRect(0, 0, width, height);
 
+    const resolveX = (x) => (this.config.invertX ? width - x : x);
+
+    const nosePx = this._nose.valid
+      ? { x: resolveX(this._nose.x * width), y: this._nose.y * height }
+      : null;
+    const leftIrisPx = this._leftIris.valid
+      ? { x: resolveX(this._leftIris.x * width), y: this._leftIris.y * height }
+      : null;
+    const rightIrisPx = this._rightIris.valid
+      ? { x: resolveX(this._rightIris.x * width), y: this._rightIris.y * height }
+      : null;
+
+    let irisCenter = null;
+    if (leftIrisPx && rightIrisPx) {
+      irisCenter = {
+        x: (leftIrisPx.x + rightIrisPx.x) * 0.5,
+        y: (leftIrisPx.y + rightIrisPx.y) * 0.5,
+      };
+    } else if (leftIrisPx || rightIrisPx) {
+      irisCenter = leftIrisPx ?? rightIrisPx;
+    }
+
     // Draw motion trail from recent buffer samples.
     if (this.bufferCount > 1) {
       ctx.beginPath();
@@ -937,6 +964,36 @@ export class QalamTracker {
 
     const gazePx = width * 0.5 + this.smoothedGaze.x * width * 0.55;
     const gazePy = height * 0.5 + this.smoothedGaze.y * height * 0.55;
+
+    if (nosePx) {
+      ctx.beginPath();
+      ctx.arc(nosePx.x, nosePx.y, 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#ff6b6b';
+      ctx.fill();
+    }
+
+    if (leftIrisPx) {
+      ctx.beginPath();
+      ctx.arc(leftIrisPx.x, leftIrisPx.y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = '#4dd4ff';
+      ctx.fill();
+    }
+
+    if (rightIrisPx) {
+      ctx.beginPath();
+      ctx.arc(rightIrisPx.x, rightIrisPx.y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffd166';
+      ctx.fill();
+    }
+
+    if (nosePx && irisCenter) {
+      ctx.beginPath();
+      ctx.moveTo(nosePx.x, nosePx.y);
+      ctx.lineTo(irisCenter.x, irisCenter.y);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
 
     ctx.beginPath();
     ctx.arc(gazePx, gazePy, 6, 0, Math.PI * 2);

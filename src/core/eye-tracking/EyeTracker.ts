@@ -13,6 +13,8 @@ import {
   EYE_TRACKING_CAMERA_OFF_NULL_STREAK,
   EYE_TRACKING_FACE_LOST_TIMEOUT_MS,
   EYE_TRACKING_INTERVAL_MS,
+  EYE_TRACKING_INVERT_X,
+  EYE_TRACKING_INVERT_Y,
   EYE_TRACKING_MIN_CONFIDENCE,
   EYE_TRACKING_SMOOTHING_WINDOW,
 } from '../../shared/constants';
@@ -40,14 +42,63 @@ const LINE_SKIP_DELTA_PX = 40;
 const HEAD_MOTION_NORMALIZER = 0.025;
 const HEAD_COMPENSATION_X = 0.20;
 const HEAD_COMPENSATION_Y = 0.24;
-const EYE_GAIN_X = 1.14;
-const EYE_GAIN_Y = 1.08;
+const EYE_GAIN_X = 1.05;
+const EYE_GAIN_Y = 1.03;
 const FAST_MOTION_THRESHOLD_PX = 22;
 
 const LEFT_EAR_POINTS = [33, 159, 158, 133, 153, 145] as const;
 const RIGHT_EAR_POINTS = [362, 386, 385, 263, 373, 374] as const;
 const LEFT_IRIS_POINTS = [468, 469, 470, 471, 472] as const;
 const RIGHT_IRIS_POINTS = [473, 474, 475, 476, 477] as const;
+
+// --- STEP 3: One Euro Filter Implementation ---
+class OneEuroFilter {
+  private minCutoff: number;
+  private beta: number;
+  private dCutoff: number;
+  private xPrev: number | null = null;
+  private dxPrev: number | null = null;
+  private tPrev: number | null = null;
+
+  constructor(minCutoff = 1.0, beta = 0.007, dCutoff = 1.0) {
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.dCutoff = dCutoff;
+  }
+
+  private alpha(cutoff: number, dt: number): number {
+    const tau = 1.0 / (2 * Math.PI * cutoff);
+    return 1.0 / (1.0 + tau / dt);
+  }
+
+  filter(x: number, t: number): number {
+    if (this.tPrev === null || this.xPrev === null || this.dxPrev === null) {
+      this.xPrev = x;
+      this.dxPrev = 0;
+      this.tPrev = t;
+      return x;
+    }
+
+    const dt = (t - this.tPrev) / 1000.0; // convert to seconds
+    if (dt <= 0) return x;
+
+    const dx = (x - this.xPrev) / dt;
+    const edx = this.dxPrev + this.alpha(this.dCutoff, dt) * (dx - this.dxPrev);
+    const cutoff = this.minCutoff + this.beta * Math.abs(edx);
+    const result = this.xPrev + this.alpha(cutoff, dt) * (x - this.xPrev);
+
+    this.xPrev = result;
+    this.dxPrev = edx;
+    this.tPrev = t;
+    return result;
+  }
+
+  reset() {
+    this.xPrev = null;
+    this.dxPrev = null;
+    this.tPrev = null;
+  }
+}
 
 export class EyeTracker {
   private readonly sessionId: string;
@@ -80,6 +131,10 @@ export class EyeTracker {
   private previousNose: NormalizedLandmark | null = null;
   private baselineNose: NormalizedLandmark | null = null;
   private baselineNoseSamples = 0;
+
+  // --- STEP 3: One Euro Filter Instances ---
+  private filterX = new OneEuroFilter(0.8, 0.005, 1.0);
+  private filterY = new OneEuroFilter(0.8, 0.005, 1.0);
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -282,10 +337,18 @@ export class EyeTracker {
   }
 
   private scheduleFrameLoop(): void {
-    const tick = async (): Promise<void> => {
+    let lastFrameTime = 0;
+    const TARGET_FPS = 30;
+    const FRAME_MIN_TIME = 1000 / TARGET_FPS;
+
+    const tick = async (currentTime: number): Promise<void> => {
       if (!this.isRunning) return;
 
-      if (!this.isPaused && this.videoEl && this.faceMesh && !this.isFrameInFlight) {
+      const dt = currentTime - lastFrameTime;
+
+      // --- STEP 7: Limit processing to ~30 FPS ---
+      if (!this.isPaused && this.videoEl && this.faceMesh && !this.isFrameInFlight && dt >= FRAME_MIN_TIME) {
+        lastFrameTime = currentTime - (dt % FRAME_MIN_TIME);
         this.isFrameInFlight = true;
         try {
           await this.faceMesh.send({ image: this.videoEl });
@@ -296,12 +359,10 @@ export class EyeTracker {
         }
       }
 
-      this.rafId = requestAnimationFrame(() => {
-        void tick();
-      });
+      this.rafId = requestAnimationFrame(tick);
     };
 
-    void tick();
+    this.rafId = requestAnimationFrame(tick);
   }
 
   private startHealthMonitor(): void {
@@ -377,30 +438,111 @@ export class EyeTracker {
     if (points.length < 3) return;
 
     let longestFixation = 0;
-    let currentFixation = 0;
     let regressionCount = 0;
     let lineSkips = 0;
     let totalDisplacement = 0;
 
+    // --- STEP 6: Refactor Metrics Layer ---
+    
+    // 1. Dispersion-based Fixation Detection
+    // Check if points stay within radius R for time T
+    const FIXATION_DISPERSION_RADIUS = 30; // px
+    let currentFixationStart = points[0].timestamp;
+    let currentFixationCentroid = { x: points[0].x, y: points[0].y };
+    let currentFixationCount = 1;
+
     for (let i = 1; i < points.length; i++) {
-      const prev = points[i - 1];
-      const curr = points[i];
-      const dt = Math.max(1, curr.timestamp - prev.timestamp);
-      const dx = curr.x - prev.x;
-      const dy = curr.y - prev.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
+        const curr = points[i];
+        const prev = points[i - 1];
+        const dt = Math.max(1, curr.timestamp - prev.timestamp);
+        
+        const dxFromCentroid = curr.x - currentFixationCentroid.x;
+        const dyFromCentroid = curr.y - currentFixationCentroid.y;
+        const distFromCentroid = Math.hypot(dxFromCentroid, dyFromCentroid);
 
-      totalDisplacement += dist;
+        totalDisplacement += Math.hypot(curr.x - prev.x, curr.y - prev.y);
 
-      if (dist <= FIXATION_RADIUS_PX) {
-        currentFixation += dt;
-        longestFixation = Math.max(longestFixation, currentFixation);
-      } else {
-        currentFixation = 0;
-      }
+        if (distFromCentroid <= FIXATION_DISPERSION_RADIUS) {
+            // Update centroid
+            currentFixationCentroid.x = (currentFixationCentroid.x * currentFixationCount + curr.x) / (currentFixationCount + 1);
+            currentFixationCentroid.y = (currentFixationCentroid.y * currentFixationCount + curr.y) / (currentFixationCount + 1);
+            currentFixationCount++;
+            
+            const currentDuration = curr.timestamp - currentFixationStart;
+            longestFixation = Math.max(longestFixation, currentDuration);
+        } else {
+            currentFixationStart = curr.timestamp;
+            currentFixationCentroid = { x: curr.x, y: curr.y };
+            currentFixationCount = 1;
+        }
+    }
 
-      if (dx < -REGRESSION_DELTA_PX) regressionCount++;
-      if (Math.abs(dy) > LINE_SKIP_DELTA_PX) lineSkips++;
+    // 2. Direction Reversal Regression Detection
+    let isMovingRight = true;
+    let leftwardMovementDuration = 0;
+    const REGRESSION_REVERSAL_MS_THRESHOLD = 150; // Need to move backwards for > 150ms to count as a regression
+
+    for (let i = 1; i < points.length; i++) {
+        const curr = points[i];
+        const prev = points[i - 1];
+        const dx = curr.x - prev.x;
+        const dt = Math.max(1, curr.timestamp - prev.timestamp);
+
+        if (dx > 2) {
+            // Moving forward (right)
+            isMovingRight = true;
+            leftwardMovementDuration = 0;
+        } else if (dx < -2) {
+            // Moving backward (left)
+            if (isMovingRight) {
+                // Just turned left
+                isMovingRight = false;
+                leftwardMovementDuration = dt;
+            } else {
+                leftwardMovementDuration += dt;
+                // Only count regression if the streak is long enough (prevents counting jitter)
+                if (leftwardMovementDuration > REGRESSION_REVERSAL_MS_THRESHOLD && leftwardMovementDuration - dt <= REGRESSION_REVERSAL_MS_THRESHOLD) {
+                    regressionCount++;
+                }
+            }
+        }
+    }
+
+    // 3. Line Skip Detection (Y-axis grouping / clustering)
+    const Y_BAND_HEIGHT = 45; // Approximate line height in pixels
+    let prevBandIndex: number | null = null;
+    let timeInCurrentBand = 0;
+    const METRIC_BAND_STABLE_MS = 120; // Need to dwell out of band to consider it a real shift
+
+    for (let i = 1; i < points.length; i++) {
+        const curr = points[i];
+        const prev = points[i - 1];
+        const dt = Math.max(1, curr.timestamp - prev.timestamp);
+        const currentBandIdx = Math.floor(curr.y / Y_BAND_HEIGHT);
+
+        if (prevBandIndex === null) {
+            prevBandIndex = currentBandIdx;
+            continue;
+        }
+
+        if (currentBandIdx === prevBandIndex) {
+            // Stable in band
+            timeInCurrentBand += dt;
+        } else {
+            // Moved to a different band
+            const bandDiff = Math.abs(currentBandIdx - prevBandIndex);
+            
+            if (bandDiff > 1 && timeInCurrentBand > METRIC_BAND_STABLE_MS) {
+                // If it's a large jump (>1 band difference) and we were previously stable
+                lineSkips++;
+                timeInCurrentBand = 0;
+                prevBandIndex = currentBandIdx;
+            } else if (timeInCurrentBand > METRIC_BAND_STABLE_MS / 2) {
+                // Just moving down/up normally or small jump without counting lineSkip, update band
+                timeInCurrentBand = 0;
+                prevBandIndex = currentBandIdx;
+            }
+        }
     }
 
     const duration = Math.max(1, points[points.length - 1].timestamp - points[0].timestamp);
@@ -420,51 +562,74 @@ export class EyeTracker {
     EventBus.emit('gaze:metrics', metrics, this.sessionId);
   }
 
+  private lastStablePoint: { x: number; y: number } | null = null;
+  private lastFinalPoint: { x: number; y: number } | null = null;
+  private lastFinalTime: number | null = null;
+  private readonly CONFIDENCE_THRESHOLD = 0.45;
+
   private smoothPoint(point: GazePointData): GazePointData {
-    this.smoothingBuffer.push(point);
-    if (this.smoothingBuffer.length > EYE_TRACKING_SMOOTHING_WINDOW) {
-      this.smoothingBuffer.shift();
+    // --- STEP 4: Confidence-Based Filtering ---
+    let blendedX = point.x;
+    let blendedY = point.y;
+
+    if (this.lastStablePoint) {
+      if (point.confidence < this.CONFIDENCE_THRESHOLD) {
+        // Discard frame effectively by reusing the last stable point
+        blendedX = this.lastStablePoint.x;
+        blendedY = this.lastStablePoint.y;
+      } else {
+        // Blend using lerp
+        // Lerp factor depends on confidence: higher confidence -> closer to current point
+        const alpha = clamp(point.confidence, 0, 1);
+        blendedX = this.lastStablePoint.x + (point.x - this.lastStablePoint.x) * alpha;
+        blendedY = this.lastStablePoint.y + (point.y - this.lastStablePoint.y) * alpha;
+      }
     }
 
-    const len = this.smoothingBuffer.length;
-    const latest = this.smoothingBuffer[len - 1];
-    const prev = len > 1 ? this.smoothingBuffer[len - 2] : latest;
-    const motion = Math.hypot(latest.x - prev.x, latest.y - prev.y);
+    this.lastStablePoint = { x: blendedX, y: blendedY };
 
-    const dynamicWindow =
-      motion >= FAST_MOTION_THRESHOLD_PX
-        ? Math.max(3, Math.floor(EYE_TRACKING_SMOOTHING_WINDOW / 2))
-        : EYE_TRACKING_SMOOTHING_WINDOW;
+    // --- STEP 3: Apply One Euro Filter ---
+    const smoothedX = this.filterX.filter(blendedX, point.timestamp);
+    const smoothedY = this.filterY.filter(blendedY, point.timestamp);
 
-    const points = this.smoothingBuffer.slice(-dynamicWindow);
+    // --- STEP 5: Clamp and Stabilize Output ---
+    const maxVelocityPxMs = 3.0; // max movement pixel per ms
+    const deadZonePx = 1.2; // ignore sub-pixel jitters
 
-    let weightedX = 0;
-    let weightedY = 0;
-    let weightedConfidence = 0;
-    let totalWeight = 0;
+    let finalX = smoothedX;
+    let finalY = smoothedY;
 
-    // Poids croissants vers les points récents pour réduire le lag.
-    for (let i = 0; i < points.length; i++) {
-      const weight = i + 1;
-      totalWeight += weight;
-      weightedX += points[i].x * weight;
-      weightedY += points[i].y * weight;
-      weightedConfidence += points[i].confidence * weight;
+    if (this.lastFinalPoint && this.lastFinalTime) {
+      const dt = Math.max(1, point.timestamp - this.lastFinalTime);
+      const dx = finalX - this.lastFinalPoint.x;
+      const dy = finalY - this.lastFinalPoint.y;
+      const distance = Math.hypot(dx, dy);
+
+      // Dead zone
+      if (distance < deadZonePx) {
+        finalX = this.lastFinalPoint.x;
+        finalY = this.lastFinalPoint.y;
+      } else {
+        // Velocity clamp
+        if (distance / dt > maxVelocityPxMs) {
+          const ratio = (maxVelocityPxMs * dt) / distance;
+          finalX = this.lastFinalPoint.x + dx * ratio;
+          finalY = this.lastFinalPoint.y + dy * ratio;
+        }
+      }
     }
 
-    const averagedX = weightedX / Math.max(1, totalWeight);
-    const averagedY = weightedY / Math.max(1, totalWeight);
-    const settleFactor = motion < FAST_MOTION_THRESHOLD_PX * 0.45 ? 0.34 : 0.14;
+    // Screen bounds clamp
+    finalX = clamp(finalX, 0, window.innerWidth);
+    finalY = clamp(finalY, 0, window.innerHeight);
 
-    // À l'arrêt, on rapproche légèrement le point lissé du dernier point mesuré
-    // pour éviter une position finale décalée après un mouvement.
-    const settledX = averagedX + (latest.x - averagedX) * settleFactor;
-    const settledY = averagedY + (latest.y - averagedY) * settleFactor;
+    this.lastFinalPoint = { x: finalX, y: finalY };
+    this.lastFinalTime = point.timestamp;
 
     return {
-      x: settledX,
-      y: settledY,
-      confidence: weightedConfidence / Math.max(1, totalWeight),
+      x: finalX,
+      y: finalY,
+      confidence: point.confidence,
       timestamp: point.timestamp,
     };
   }
@@ -479,36 +644,55 @@ export class EyeTracker {
 
     if (!leftIris || !rightIris) return null;
 
-    const xNorm = (leftIris.x + rightIris.x) / 2;
-    const yNorm = (leftIris.y + rightIris.y) / 2;
+    const irisCenterX = (leftIris.x + rightIris.x) / 2;
+    const irisCenterY = (leftIris.y + rightIris.y) / 2;
 
+    const innerLeftEye = landmarks[133];
+    const innerRightEye = landmarks[362];
+    
+    if (!innerLeftEye || !innerRightEye) return null;
+
+    const anchorX = (innerLeftEye.x + innerRightEye.x) / 2;
+    const anchorY = (innerLeftEye.y + innerRightEye.y) / 2;
+
+    const outerLeftEye = landmarks[33];
+    const outerRightEye = landmarks[263];
+    const faceWidth = Math.abs(outerRightEye.x - outerLeftEye.x) || 0.1;
+
+    // --- STEP 1: Compute Gaze Vector ---
+    let compensatedX = (irisCenterX - anchorX) / faceWidth;
+    let compensatedY = (irisCenterY - anchorY) / faceWidth;
+
+    // --- STEP 2: Basic Head Pose Compensation ---
     const nose = landmarks[1];
-    let compensatedX = xNorm;
-    let compensatedY = yNorm;
+    if (nose) {
+      const yaw = (nose.x - anchorX) / faceWidth;
+      const pitch = (nose.y - anchorY) / faceWidth;
+      
+      const k1 = 0.5; // Empirical yaw correction constant
+      const k2 = 0.4; // Empirical pitch correction constant
 
-    if (nose && this.baselineNose) {
-      compensatedX = clamp(
-        compensatedX - (nose.x - this.baselineNose.x) * HEAD_COMPENSATION_X,
-        0,
-        1
-      );
-      compensatedY = clamp(
-        compensatedY - (nose.y - this.baselineNose.y) * HEAD_COMPENSATION_Y,
-        0,
-        1
-      );
+      compensatedX -= yaw * k1;
+      compensatedY -= pitch * k2;
     }
 
-    // Gain léger autour du centre pour mieux couvrir les mouvements de l'oeil.
-    compensatedX = clamp((compensatedX - 0.5) * EYE_GAIN_X + 0.5, 0, 1);
-    compensatedY = clamp((compensatedY - 0.5) * EYE_GAIN_Y + 0.5, 0, 1);
+    // We still apply gain around the center to keep the output in the [0, 1] range properly
+    // The base gaze without offset is 0, so we shift it to 0.5 center.
+    compensatedX = clamp(compensatedX * EYE_GAIN_X * 5.0 + 0.5, 0, 1);
+    compensatedY = clamp(compensatedY * EYE_GAIN_Y * 5.0 + 0.5, 0, 1);
 
     const baseConfidence = clamp(1 - Math.abs(leftIris.y - rightIris.y) * 3, 0, 1);
     const confidence = clamp(baseConfidence * 0.78 + headStability * 0.22, 0, 1);
 
+    let normalizedX = compensatedX;
+    let normalizedY = compensatedY;
+
+    if (EYE_TRACKING_INVERT_X) normalizedX = 1 - normalizedX;
+    if (EYE_TRACKING_INVERT_Y) normalizedY = 1 - normalizedY;
+
     return {
-      x: compensatedX * window.innerWidth,
-      y: compensatedY * window.innerHeight,
+      x: normalizedX * window.innerWidth,
+      y: normalizedY * window.innerHeight,
       timestamp,
       confidence,
     };
@@ -703,6 +887,11 @@ export class EyeTracker {
   }
 
   private resetRuntimeBuffers(): void {
+    this.filterX.reset();
+    this.filterY.reset();
+    this.lastStablePoint = null;
+    this.lastFinalPoint = null;
+    this.lastFinalTime = null;
     this.smoothingBuffer = [];
     this.gazeWindow = [];
     this.frameQualityWindow = [];

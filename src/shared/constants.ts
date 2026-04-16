@@ -27,7 +27,13 @@ export const EYE_TRACKING_INTERVAL_MS = Math.round(1000 / EYE_TRACKING_TARGET_FP
 export const EYE_TRACKING_MIN_CONFIDENCE = 0.5;
 
 /** Taille de fenêtre pour le lissage local dans EyeTracker */
-export const EYE_TRACKING_SMOOTHING_WINDOW = 6;
+export const EYE_TRACKING_SMOOTHING_WINDOW = 8;
+
+/** Inverse l'axe horizontal pour aligner le regard en mode selfie */
+export const EYE_TRACKING_INVERT_X = true;
+
+/** Inverse l'axe vertical pour aligner le regard en mode selfie */
+export const EYE_TRACKING_INVERT_Y = true;
 
 /** Timeout sans points valides avant "face_lost" */
 export const EYE_TRACKING_FACE_LOST_TIMEOUT_MS = 1500;
